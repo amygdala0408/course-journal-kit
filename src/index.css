@@ -1,0 +1,85 @@
+@import "tailwindcss";
+
+/* Academic Brutalist Design System */
+@theme {
+  /* Colors - Monochromatic palette */
+  --color-surface: #f9f9f9;
+  --color-surface-dim: #dadada;
+  --color-surface-container: #eeeeee;
+  --color-surface-container-high: #e8e8e8;
+  --color-ink: #1a1a1a;
+  --color-ink-muted: #444748;
+  --color-outline: #747878;
+  --color-outline-variant: #c4c7c7;
+  --color-inverse-surface: #2f3131;
+  --color-inverse-on-surface: #f1f1f1;
+  --color-error: #ba1a1a;
+  --color-error-container: #ffdad6;
+
+  /* Dark mode colors */
+  --color-dark-surface: #1a1c1c;
+  --color-dark-surface-container: #2f3131;
+  --color-dark-ink: #f1f1f1;
+  --color-dark-ink-muted: #c4c7c7;
+  --color-dark-outline: #8e9192;
+
+  /* Typography */
+  --font-editorial: "Newsreader", Georgia, serif;
+  --font-sans: "Inter", system-ui, sans-serif;
+  --font-mono: "Space Grotesk", ui-monospace, monospace;
+
+  /* Spacing */
+  --spacing-unit: 4px;
+  --spacing-gutter: 24px;
+  --spacing-margin: 48px;
+  --spacing-stack-tight: 8px;
+  --spacing-stack-medium: 24px;
+  --spacing-stack-large: 64px;
+}
+
+/* Base styles */
+:root {
+  font-family: var(--font-sans);
+  font-size: 18px;
+  line-height: 1.7;
+  color: var(--color-ink);
+  background: var(--color-surface);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Dark mode */
+.dark {
+  color: var(--color-dark-ink);
+  background: var(--color-dark-surface);
+}
+
+body {
+  margin: 0;
+}
+
+/* Editorial typography */
+.font-editorial {
+  font-family: var(--font-editorial);
+}
+
+.font-mono {
+  font-family: var(--font-mono);
+}
+
+/* Sharp corners - Brutalist aesthetic */
+* {
+  border-radius: 0 !important;
+}
+
+/* Focus states - 2px border */
+*:focus-visible {
+  outline: 2px solid var(--color-ink);
+  outline-offset: 2px;
+}
+
+.dark *:focus-visible {
+  outline-color: var(--color-dark-ink);
+}
