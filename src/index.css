@@ -1,34 +1,50 @@
 @import "tailwindcss";
 
-/* Academic Brutalist Design System */
+/* Tailwind v4 dark mode: switch from media-query to .dark class */
+/* Without this, our in-app toggle adds .dark to <html> but Tailwind */
+/* keeps using prefers-color-scheme, so headlines render in light-ink */
+/* on dark surfaces. The selector covers both the element itself and  */
+/* anything nested under it. */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* ============================================================
+ * Academic Brutalist & Editorial Archive
+ * Monochromatic, typographically-driven design system.
+ * Palette mirrors black ink on warm paper; dark mode mirrors
+ * white ink on archival graphite.
+ * ============================================================ */
 @theme {
-  /* Colors - Monochromatic palette */
-  --color-surface: #f9f9f9;
-  --color-surface-dim: #dadada;
-  --color-surface-container: #eeeeee;
-  --color-surface-container-high: #e8e8e8;
+  /* Light surfaces — warm "paper" canvas */
+  --color-surface: #fdf8f8;
+  --color-surface-dim: #ece7e7;
+  --color-surface-container: #f4f1f1;
+  --color-surface-container-high: #ebe8e8;
+  --color-surface-container-highest: #e2e0e0;
+
   --color-ink: #1a1a1a;
-  --color-ink-muted: #444748;
-  --color-outline: #747878;
-  --color-outline-variant: #c4c7c7;
-  --color-inverse-surface: #2f3131;
-  --color-inverse-on-surface: #f1f1f1;
+  --color-ink-muted: #4a4a4a;
+  --color-outline: #6b6b6b;
+  --color-outline-variant: #c4c0c0;
+  --color-inverse-surface: #1a1a1a;
+  --color-inverse-on-surface: #fdf8f8;
+
   --color-error: #ba1a1a;
   --color-error-container: #ffdad6;
 
-  /* Dark mode colors */
-  --color-dark-surface: #1a1c1c;
-  --color-dark-surface-container: #2f3131;
-  --color-dark-ink: #f1f1f1;
-  --color-dark-ink-muted: #c4c7c7;
-  --color-dark-outline: #8e9192;
+  /* Dark surfaces — graphite archive */
+  --color-dark-surface: #161717;
+  --color-dark-surface-container: #232525;
+  --color-dark-surface-container-high: #2c2e2e;
+  --color-dark-ink: #f4f1ef;
+  --color-dark-ink-muted: #b9b6b3;
+  --color-dark-outline: #8a8a8a;
 
-  /* Typography */
-  --font-editorial: "Newsreader", Georgia, serif;
-  --font-sans: "Inter", system-ui, sans-serif;
-  --font-mono: "Space Grotesk", ui-monospace, monospace;
+  /* Typography stack */
+  --font-editorial: "Newsreader", "Iowan Old Style", Georgia, serif;
+  --font-sans: "Inter", system-ui, -apple-system, sans-serif;
+  --font-mono: "Space Grotesk", "IBM Plex Mono", ui-monospace, monospace;
 
-  /* Spacing */
+  /* Spacing scale (4px baseline) */
   --spacing-unit: 4px;
   --spacing-gutter: 24px;
   --spacing-margin: 48px;
@@ -37,10 +53,12 @@
   --spacing-stack-large: 64px;
 }
 
-/* Base styles */
+/* ============================================================
+ * Base
+ * ============================================================ */
 :root {
   font-family: var(--font-sans);
-  font-size: 18px;
+  font-size: 17px;
   line-height: 1.7;
   color: var(--color-ink);
   background: var(--color-surface);
@@ -48,38 +66,113 @@
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  font-feature-settings: "kern", "liga", "calt";
 }
 
-/* Dark mode */
 .dark {
   color: var(--color-dark-ink);
   background: var(--color-dark-surface);
+  color-scheme: dark;
 }
 
 body {
   margin: 0;
 }
 
-/* Editorial typography */
+/* Long-form reading — gentle measure on the body */
+p {
+  text-wrap: pretty;
+}
+
+/* Editorial headings — tight spacing, OpenType figures */
+h1,
+h2,
+h3 {
+  text-wrap: balance;
+  font-feature-settings: "kern", "liga", "calt", "ss01", "lnum";
+}
+
+/* ============================================================
+ * Typography utilities
+ * ============================================================ */
 .font-editorial {
   font-family: var(--font-editorial);
+  letter-spacing: -0.015em;
+  font-feature-settings: "kern", "liga", "calt", "ss01", "lnum";
 }
 
 .font-mono {
   font-family: var(--font-mono);
+  font-feature-settings: "kern", "tnum";
 }
 
-/* Sharp corners - Brutalist aesthetic */
-* {
+/* "Index card" labels — Space Grotesk, all-caps, wide tracking */
+.font-mono.uppercase {
+  letter-spacing: 0.08em;
+}
+
+/* Italic editorial pull-quotes pick up the optical italic */
+.font-editorial.italic {
+  font-style: italic;
+  font-feature-settings: "kern", "liga", "calt", "onum";
+}
+
+/* ============================================================
+ * Brutalist primitives
+ * Sharp 90° corners on every surface element.
+ * ============================================================ */
+*,
+*::before,
+*::after {
   border-radius: 0 !important;
 }
 
-/* Focus states - 2px border */
+/* Focus ring — 2px solid, never blurred */
 *:focus-visible {
   outline: 2px solid var(--color-ink);
   outline-offset: 2px;
 }
-
 .dark *:focus-visible {
   outline-color: var(--color-dark-ink);
+}
+
+/* Selection — invert ink/paper */
+::selection {
+  background: var(--color-ink);
+  color: var(--color-inverse-on-surface);
+}
+.dark ::selection {
+  background: var(--color-dark-ink);
+  color: var(--color-dark-surface);
+}
+
+/* Scrollbar — thin, monochrome */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-outline-variant) transparent;
+}
+.dark * {
+  scrollbar-color: var(--color-dark-outline) transparent;
+}
+
+/* Native form controls inherit ink color in dark mode so placeholders
+ * and select-arrow glyphs stay legible. */
+.dark input,
+.dark textarea,
+.dark select,
+.dark button {
+  color: inherit;
+}
+.dark input::placeholder,
+.dark textarea::placeholder {
+  color: var(--color-dark-ink-muted);
+  opacity: 0.85;
+}
+
+/* The text-only entry-title <input> uses transparent background; force
+ * inherited ink color so it's legible in both modes. */
+.dark input[type="text"],
+.dark input[type="url"],
+.dark input[type="search"] {
+  background-color: transparent;
 }

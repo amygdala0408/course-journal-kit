@@ -235,8 +235,8 @@ function evaluateRubricChecks(
 
   course.rubrics.forEach((rubric) => {
     rubric.checks.forEach((check) => {
-      let earnedPoints = 0;
-      let details = '';
+      let earnedPoints: number;
+      let details: string;
 
       switch (check.id) {
         // Journal Setup Rubric

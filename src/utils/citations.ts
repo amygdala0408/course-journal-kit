@@ -66,25 +66,28 @@ export function generateAPACitation(meta: CitationMetadata): string {
         return citation;
       }
     
-    case 'book':
+    case 'book': {
       let bookCitation = `${authorStr} (${year}). *${formattedTitle}*.`;
       if (meta.publisher) bookCitation += ` ${meta.publisher}.`;
       if (doi) bookCitation += ` https://doi.org/${doi}`;
       else if (url) bookCitation += ` ${url}`;
       return bookCitation;
-    
-    case 'video':
+    }
+
+    case 'video': {
       let videoCitation = `${authorStr} (${year}). *${formattedTitle}* [Video].`;
       if (siteName) videoCitation += ` ${siteName}.`;
       if (url) videoCitation += ` ${url}`;
       return videoCitation;
-    
+    }
+
     case 'website':
-    default:
+    default: {
       let webCitation = `${authorStr} (${year}). ${formattedTitle}.`;
       if (siteName && siteName !== authorStr) webCitation += ` *${siteName}*.`;
       if (url) webCitation += ` ${url}`;
       return webCitation;
+    }
   }
 }
 

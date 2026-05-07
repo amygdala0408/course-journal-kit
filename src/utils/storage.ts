@@ -1,6 +1,7 @@
 // localStorage utilities for Course Journal Kit
 
 import type {
+  CoursePack,
   JournalData,
   JournalEntry,
   FurtherExplorationArea,
@@ -23,7 +24,7 @@ const STORAGE_KEYS = {
 const defaultSettings: UserSettings = {
   studentName: '',
   darkMode: 'system',
-  autoSaveInterval: 30000,
+  autoSaveInterval: 2000, // ms; debounce window between last keystroke and write
   defaultTags: [],
 };
 
@@ -33,8 +34,18 @@ const defaultJournalData: JournalData = {
   reviewCards: [],
   syntheses: [],
   sources: [],
+  customCoursePacks: [],
   settings: defaultSettings,
 };
+
+function createId(prefix: string): string {
+  const randomId =
+    typeof crypto !== 'undefined' && 'randomUUID' in crypto
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+
+  return `${prefix}-${randomId}`;
+}
 
 // ============================================
 // LOAD / SAVE
@@ -42,6 +53,7 @@ const defaultJournalData: JournalData = {
 
 export function loadJournalData(): JournalData {
   try {
+    if (typeof localStorage === 'undefined') return defaultJournalData;
     const stored = localStorage.getItem(STORAGE_KEYS.JOURNAL_DATA);
     if (!stored) return defaultJournalData;
     
@@ -49,6 +61,12 @@ export function loadJournalData(): JournalData {
     return {
       ...defaultJournalData,
       ...parsed,
+      entries: parsed.entries || [],
+      furtherExplorationAreas: parsed.furtherExplorationAreas || [],
+      reviewCards: parsed.reviewCards || [],
+      syntheses: parsed.syntheses || [],
+      sources: parsed.sources || [],
+      customCoursePacks: parsed.customCoursePacks || [],
       settings: { ...defaultSettings, ...parsed.settings },
     };
   } catch (error) {
@@ -59,10 +77,100 @@ export function loadJournalData(): JournalData {
 
 export function saveJournalData(data: JournalData): void {
   try {
+    if (typeof localStorage === 'undefined') return;
     localStorage.setItem(STORAGE_KEYS.JOURNAL_DATA, JSON.stringify(data));
   } catch (error) {
     console.error('Failed to save journal data:', error);
   }
+}
+
+// ============================================
+// CUSTOM COURSE PACKS
+// ============================================
+
+export function getCustomCoursePacks(): CoursePack[] {
+  return loadJournalData().customCoursePacks || [];
+}
+
+export function getCustomCoursePack(courseId: string): CoursePack | undefined {
+  return getCustomCoursePacks().find((course) => course.id === courseId);
+}
+
+export function saveCustomCoursePack(coursePack: CoursePack): void {
+  const data = loadJournalData();
+  const existingIndex = data.customCoursePacks.findIndex((course) => course.id === coursePack.id);
+
+  if (existingIndex >= 0) {
+    data.customCoursePacks[existingIndex] = coursePack;
+  } else {
+    data.customCoursePacks.push(coursePack);
+  }
+
+  saveJournalData(data);
+}
+
+export function deleteCustomCoursePack(courseId: string): void {
+  const data = loadJournalData();
+  data.customCoursePacks = data.customCoursePacks.filter((course) => course.id !== courseId);
+  saveJournalData(data);
+}
+
+export function seedSourcesFromCoursePack(coursePack: CoursePack): number {
+  const data = loadJournalData();
+  if (!data.sources) data.sources = [];
+
+  const existingKeys = new Set(
+    data.sources
+      .filter((source) => source.courseId === coursePack.id)
+      .map((source) => source.syllabusSourceId || `${source.sectionId}:${source.title.toLowerCase()}`)
+  );
+
+  let createdCount = 0;
+  const now = new Date().toISOString();
+
+  coursePack.sections.forEach((section) => {
+    section.requiredSources?.forEach((sourceSeed) => {
+      const sourceKey = sourceSeed.id || `${section.id}:${sourceSeed.title.toLowerCase()}`;
+      if (existingKeys.has(sourceKey)) return;
+
+      data.sources.push({
+        id: createId('source'),
+        courseId: coursePack.id,
+        sectionId: section.id,
+        syllabusSourceId: sourceSeed.id,
+        title: sourceSeed.title,
+        authors: sourceSeed.authors,
+        url: sourceSeed.url,
+        type: sourceSeed.type || 'article',
+        citation: sourceSeed.citation,
+        sourceOrigin: 'syllabus',
+        required: sourceSeed.required ?? true,
+        uploadRequired: sourceSeed.uploadRequired ?? !sourceSeed.url,
+        usedInEntryIds: [],
+        isAssigned: sourceSeed.required ?? true,
+        isSupplementary: !(sourceSeed.required ?? true),
+        readingStatus: 'unread',
+        notes: sourceSeed.notes || '',
+        keyQuotes: [],
+        keyTerms: [],
+        questions: '',
+        connections: '',
+        tags: ['syllabus'],
+        addedAt: now,
+        updatedAt: now,
+      });
+      existingKeys.add(sourceKey);
+      createdCount += 1;
+    });
+  });
+
+  saveJournalData(data);
+  return createdCount;
+}
+
+export function installCustomCoursePack(coursePack: CoursePack): number {
+  saveCustomCoursePack(coursePack);
+  return seedSourcesFromCoursePack(coursePack);
 }
 
 // ============================================
@@ -218,26 +326,166 @@ export function exportJournalData(): string {
   return JSON.stringify(data, null, 2);
 }
 
-export function importJournalData(jsonString: string): boolean {
-  try {
-    const parsed = JSON.parse(jsonString) as JournalData;
-    
-    // Validate structure
-    if (!parsed.entries || !Array.isArray(parsed.entries)) {
-      throw new Error('Invalid data structure: missing entries array');
+export type ImportMode = 'merge' | 'replace';
+
+export type ImportResult = {
+  success: boolean;
+  mode: ImportMode;
+  added: {
+    entries: number;
+    sources: number;
+    explorationAreas: number;
+    reviewCards: number;
+    syntheses: number;
+    customCoursePacks: number;
+  };
+  updated: {
+    entries: number;
+    sources: number;
+    explorationAreas: number;
+    reviewCards: number;
+    syntheses: number;
+    customCoursePacks: number;
+  };
+  error?: string;
+};
+
+const emptyCounters = (): ImportResult['added'] => ({
+  entries: 0,
+  sources: 0,
+  explorationAreas: 0,
+  reviewCards: 0,
+  syntheses: 0,
+  customCoursePacks: 0,
+});
+
+type IdentifiableCollection<T extends { id: string }> = T[];
+
+function mergeCollection<T extends { id: string }>(
+  existing: IdentifiableCollection<T>,
+  incoming: IdentifiableCollection<T> | undefined,
+  preferIncoming: (incoming: T, existing: T) => T = (next) => next
+): { result: T[]; added: number; updated: number } {
+  if (!incoming || incoming.length === 0) {
+    return { result: existing, added: 0, updated: 0 };
+  }
+
+  const byId = new Map(existing.map((item) => [item.id, item]));
+  let added = 0;
+  let updated = 0;
+
+  incoming.forEach((item) => {
+    if (!item || typeof item.id !== 'string') return;
+    if (byId.has(item.id)) {
+      byId.set(item.id, preferIncoming(item, byId.get(item.id) as T));
+      updated += 1;
+    } else {
+      byId.set(item.id, item);
+      added += 1;
     }
-    
+  });
+
+  return { result: Array.from(byId.values()), added, updated };
+}
+
+function pickNewerByUpdatedAt<T extends { id: string; updatedAt?: string }>(
+  next: T,
+  current: T
+): T {
+  const nextDate = next.updatedAt ? Date.parse(next.updatedAt) : 0;
+  const currentDate = current.updatedAt ? Date.parse(current.updatedAt) : 0;
+  return nextDate >= currentDate ? next : current;
+}
+
+export function importJournalData(jsonString: string, mode: ImportMode = 'merge'): ImportResult {
+  const result: ImportResult = {
+    success: false,
+    mode,
+    added: emptyCounters(),
+    updated: emptyCounters(),
+  };
+
+  let parsed: Partial<JournalData>;
+  try {
+    parsed = JSON.parse(jsonString) as Partial<JournalData>;
+  } catch (error) {
+    result.error = error instanceof Error ? error.message : 'Could not parse JSON.';
+    return result;
+  }
+
+  if (!parsed.entries || !Array.isArray(parsed.entries)) {
+    result.error = 'Invalid backup: expected an "entries" array.';
+    return result;
+  }
+
+  if (mode === 'replace') {
     saveJournalData({
       ...defaultJournalData,
       ...parsed,
-      settings: { ...defaultSettings, ...parsed.settings },
-    });
-    
-    return true;
-  } catch (error) {
-    console.error('Failed to import journal data:', error);
-    return false;
+      settings: { ...defaultSettings, ...(parsed.settings ?? {}) },
+    } as JournalData);
+
+    result.success = true;
+    result.added = {
+      entries: parsed.entries.length,
+      sources: parsed.sources?.length ?? 0,
+      explorationAreas: parsed.furtherExplorationAreas?.length ?? 0,
+      reviewCards: parsed.reviewCards?.length ?? 0,
+      syntheses: parsed.syntheses?.length ?? 0,
+      customCoursePacks: parsed.customCoursePacks?.length ?? 0,
+    };
+    return result;
   }
+
+  const current = loadJournalData();
+
+  const entries = mergeCollection(current.entries, parsed.entries, pickNewerByUpdatedAt);
+  const sources = mergeCollection(current.sources, parsed.sources, pickNewerByUpdatedAt);
+  const explorationAreas = mergeCollection(
+    current.furtherExplorationAreas,
+    parsed.furtherExplorationAreas,
+    pickNewerByUpdatedAt
+  );
+  const reviewCards = mergeCollection(current.reviewCards, parsed.reviewCards);
+  const syntheses = mergeCollection(current.syntheses, parsed.syntheses, pickNewerByUpdatedAt);
+  const customCoursePacks = mergeCollection(current.customCoursePacks, parsed.customCoursePacks);
+
+  const mergedSettings: UserSettings = {
+    ...current.settings,
+    ...(parsed.settings ?? {}),
+    defaultTags: Array.from(
+      new Set([...(current.settings.defaultTags ?? []), ...(parsed.settings?.defaultTags ?? [])])
+    ),
+  };
+
+  saveJournalData({
+    entries: entries.result,
+    sources: sources.result,
+    furtherExplorationAreas: explorationAreas.result,
+    reviewCards: reviewCards.result,
+    syntheses: syntheses.result,
+    customCoursePacks: customCoursePacks.result,
+    settings: mergedSettings,
+  });
+
+  result.success = true;
+  result.added = {
+    entries: entries.added,
+    sources: sources.added,
+    explorationAreas: explorationAreas.added,
+    reviewCards: reviewCards.added,
+    syntheses: syntheses.added,
+    customCoursePacks: customCoursePacks.added,
+  };
+  result.updated = {
+    entries: entries.updated,
+    sources: sources.updated,
+    explorationAreas: explorationAreas.updated,
+    reviewCards: reviewCards.updated,
+    syntheses: syntheses.updated,
+    customCoursePacks: customCoursePacks.updated,
+  };
+  return result;
 }
 
 export function exportPublishedJournal(courseId: string, studentName: string): PublishedJournal {
@@ -254,10 +502,69 @@ export function exportPublishedJournal(courseId: string, studentName: string): P
 }
 
 // ============================================
+// DEFAULT TAGS (entry creation helper)
+// ============================================
+
+function slugifyTag(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/&/g, 'and')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 32);
+}
+
+/**
+ * Default tags applied to a brand-new journal entry.
+ *
+ * Combines (in order, deduped):
+ * 1. user's `settings.defaultTags`
+ * 2. course code or course id (e.g. `med-584`)
+ * 3. section number (e.g. `module-1`)
+ * 4. matching topic id if a section has a guiding topic
+ *
+ * The list is kept short (max 6) so the user can add their own.
+ */
+export function getDefaultTagsForNewEntry(options: {
+  course: { id: string; code?: string; sectionLabel: string };
+  sectionId?: string;
+  sectionNumber?: number;
+  topicId?: string;
+}): string[] {
+  const { course, sectionId, sectionNumber, topicId } = options;
+  const settings = getSettings();
+  const tags: string[] = [];
+
+  (settings.defaultTags ?? []).forEach((tag) => {
+    const cleaned = slugifyTag(tag);
+    if (cleaned) tags.push(cleaned);
+  });
+
+  const courseTag = slugifyTag(course.code || course.id);
+  if (courseTag) tags.push(courseTag);
+
+  if (sectionNumber !== undefined) {
+    const sectionTag = slugifyTag(`${course.sectionLabel}-${sectionNumber}`);
+    if (sectionTag) tags.push(sectionTag);
+  } else if (sectionId) {
+    const sectionTag = slugifyTag(sectionId);
+    if (sectionTag) tags.push(sectionTag);
+  }
+
+  if (topicId) {
+    const topicTag = slugifyTag(topicId);
+    if (topicTag) tags.push(topicTag);
+  }
+
+  return Array.from(new Set(tags)).slice(0, 6);
+}
+
+// ============================================
 // CLEAR DATA
 // ============================================
 
 export function clearAllData(): void {
+  if (typeof localStorage === 'undefined') return;
   localStorage.removeItem(STORAGE_KEYS.JOURNAL_DATA);
 }
 

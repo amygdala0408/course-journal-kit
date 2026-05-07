@@ -1,90 +1,240 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { useParams, useSearchParams, useNavigate, Link } from 'react-router-dom';
 import { v4 as uuidv4 } from 'uuid';
 import { getCoursePack } from '../course-packs';
-import { getEntry, saveEntry, deleteEntry, getSources, saveSource } from '../utils/storage';
+import {
+  getEntry,
+  saveEntry,
+  deleteEntry,
+  getSources,
+  saveSource,
+  getDefaultTagsForNewEntry,
+  getSettings,
+} from '../utils/storage';
 import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts';
-import type { JournalEntry, Resource, CourseSource, Artifact, ArtifactType } from '../schemas/types';
+import type { JournalEntry, Resource, CourseSource, Artifact, ArtifactType, CoursePack } from '../schemas/types';
 
-const emptyEntry = (courseId: string, sectionId: string): JournalEntry => ({
-  id: uuidv4(),
-  courseId,
-  sectionId,
-  title: '',
-  createdAt: new Date().toISOString(),
-  updatedAt: new Date().toISOString(),
-  notes: '',
-  summary: '',
-  keyConcepts: '',
-  reflection: '',
-  personalConnection: '',
-  professionalApplication: '',
-  questions: '',
-  ethicalEquityConsiderations: '',
-  keyTakeaways: '',
-  selectedLenses: [],
-  resources: [],
-  artifacts: [],
-  tags: [],
-  confidenceRating: undefined,
-  aiUseDisclosure: '',
-  published: false,
-});
+type AutosaveStatus = 'idle' | 'pending' | 'saving' | 'saved' | 'error';
+
+const emptyEntry = (
+  course: CoursePack,
+  sectionId: string,
+  topicId?: string
+): JournalEntry => {
+  const section = course.sections.find((s) => s.id === sectionId);
+  return {
+    id: uuidv4(),
+    courseId: course.id,
+    sectionId,
+    topicId,
+    title: '',
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    notes: '',
+    summary: '',
+    keyConcepts: '',
+    reflection: '',
+    personalConnection: '',
+    professionalApplication: '',
+    questions: '',
+    ethicalEquityConsiderations: '',
+    keyTakeaways: '',
+    selectedLenses: [],
+    resources: [],
+    artifacts: [],
+    tags: getDefaultTagsForNewEntry({
+      course,
+      sectionId,
+      sectionNumber: section?.number,
+      topicId,
+    }),
+    confidenceRating: undefined,
+    aiUseDisclosure: '',
+    published: false,
+  };
+};
+
+function buildStructuredDraftFromSources(sources: CourseSource[], sectionTitle?: string): Partial<JournalEntry> {
+  const sourceSummaries = sources.map((source, index) => {
+    const quotes = source.keyQuotes
+      .map((quote) => `- "${quote.text}"${quote.page ? ` (p. ${quote.page})` : ''}${quote.note ? ` — ${quote.note}` : ''}`)
+      .join('\n');
+
+    return [
+      `### ${index + 1}. ${source.title}`,
+      source.authors ? `Authors: ${source.authors}` : '',
+      source.notes ? `Notes:\n${source.notes}` : '',
+      quotes ? `Quotes:\n${quotes}` : '',
+      source.questions ? `Questions:\n${source.questions}` : '',
+      source.connections ? `Connections:\n${source.connections}` : '',
+    ].filter(Boolean).join('\n\n');
+  });
+
+  const keyTerms = Array.from(new Set(sources.flatMap((source) => source.keyTerms))).join(', ');
+  const combinedQuestions = sources
+    .map((source) => source.questions.trim())
+    .filter(Boolean)
+    .join('\n\n');
+  const combinedConnections = sources
+    .map((source) => source.connections.trim())
+    .filter(Boolean)
+    .join('\n\n');
+
+  return {
+    notes: [
+      `## Source Notes for ${sectionTitle || 'This Section'}`,
+      ...sourceSummaries,
+      '## My Reflection Notes',
+      '[Add your own synthesis, interpretation, and lived/professional connection here before publishing.]',
+    ].join('\n\n'),
+    summary: sources
+      .map((source) => `- ${source.title}: ${source.notes ? source.notes.split('\n')[0] : 'Add a short summary from your notes.'}`)
+      .join('\n'),
+    keyConcepts: keyTerms || '[List the concepts, frameworks, or vocabulary that emerged across these sources.]',
+    reflection: '[What changed, deepened, challenged, or complicated your thinking after working with these sources?]',
+    professionalApplication: combinedConnections || '[How could these ideas shape your professional practice, teaching, leadership, or decision-making?]',
+    questions: combinedQuestions || '[What questions do these sources raise for further inquiry or discussion?]',
+    ethicalEquityConsiderations: '[Who is affected by these ideas? What equity, access, privacy, cultural, or ethical considerations matter here?]',
+    keyTakeaways: sources
+      .map((source) => `- One takeaway from ${source.title}: [write your takeaway]`)
+      .join('\n'),
+    resources: sources.map((source) => ({
+      id: uuidv4(),
+      title: source.title,
+      url: source.url,
+      type: source.type,
+      citation: source.citation,
+      notes: source.notes,
+      addedAt: new Date().toISOString(),
+    })),
+    aiUseDisclosure: 'Draft scaffold generated from my saved source notes in Course Journal Kit; final reflection and interpretation should be revised in my own words.',
+  };
+}
 
 export default function EntryPage() {
   const { courseId, entryId } = useParams<{ courseId: string; entryId: string }>();
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
-  
+
   const course = courseId ? getCoursePack(courseId) : null;
   const sectionIdFromUrl = searchParams.get('section') || '';
-  
+  const topicIdFromUrl = searchParams.get('topic') || undefined;
+
   const [entry, setEntry] = useState<JournalEntry | null>(null);
-  const [saving, setSaving] = useState(false);
+  const [autosaveStatus, setAutosaveStatus] = useState<AutosaveStatus>('idle');
   const [lastSaved, setLastSaved] = useState<Date | null>(null);
   const [tagInput, setTagInput] = useState('');
   const [showSourcesPanel, setShowSourcesPanel] = useState(false);
-  const [sectionSources, setSectionSources] = useState<CourseSource[]>([]);
+  const [sourcesRefreshKey, setSourcesRefreshKey] = useState(0);
   const [showQuickAddSource, setShowQuickAddSource] = useState(false);
   const [showArtifactModal, setShowArtifactModal] = useState(false);
   const [editingArtifact, setEditingArtifact] = useState<Artifact | null>(null);
 
+  // Autosave bookkeeping (independent of render cycle to keep timers stable).
+  const dirtyRef = useRef(false);
+  const entryRef = useRef<JournalEntry | null>(null);
+  const autosaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const autosaveIntervalMs = useMemo(() => {
+    const fromSettings = getSettings().autoSaveInterval;
+    // Treat the configured value as the *upper bound* and clamp to a snappy
+    // floor of 800ms so writes feel immediate while still being debounced.
+    return Math.max(800, Math.min(fromSettings || 30000, 60000));
+  }, []);
+
+  useEffect(() => {
+    entryRef.current = entry;
+  }, [entry]);
+
+  // We deliberately key this effect to URL params (and the entry id), not the
+  // `course` object, because `getCoursePack(...)` returns a fresh reference on
+  // every render. Including `course` in the deps would re-run this on every
+  // render and clobber in-flight edits.
   useEffect(() => {
     if (!courseId) return;
-    
+    const courseForEntry = getCoursePack(courseId);
+    if (!courseForEntry) return;
+
+    /* eslint-disable react-hooks/set-state-in-effect */
     if (entryId && entryId !== 'new') {
       const existing = getEntry(entryId);
       if (existing) {
         setEntry(existing);
-        setSectionSources(getSources(courseId, existing.sectionId));
+        setLastSaved(new Date(existing.updatedAt));
       } else {
         navigate(`/course/${courseId}`);
       }
     } else {
-      const sectionId = sectionIdFromUrl || course?.sections[0]?.id || '';
-      setEntry(emptyEntry(courseId, sectionId));
-      setSectionSources(getSources(courseId, sectionId));
+      const sectionId = sectionIdFromUrl || courseForEntry.sections[0]?.id || '';
+      setEntry(emptyEntry(courseForEntry, sectionId, topicIdFromUrl));
+      setLastSaved(null);
     }
-  }, [courseId, entryId, sectionIdFromUrl, course, navigate]);
 
-  // Update sources when section changes
+    dirtyRef.current = false;
+    setAutosaveStatus('idle');
+    /* eslint-enable react-hooks/set-state-in-effect */
+  }, [courseId, entryId, sectionIdFromUrl, topicIdFromUrl, navigate]);
+
+  const sectionSources = useMemo<CourseSource[]>(() => {
+    if (!courseId || !entry?.sectionId) return [];
+    // sourcesRefreshKey is a version counter that the QuickAdd modal bumps so
+    // we can reread localStorage without having to lift the source list state.
+    void sourcesRefreshKey;
+    return getSources(courseId, entry.sectionId);
+  }, [courseId, entry?.sectionId, sourcesRefreshKey]);
+
+  const flushSave = useCallback(() => {
+    const current = entryRef.current;
+    if (!current) return;
+
+    if (autosaveTimerRef.current) {
+      clearTimeout(autosaveTimerRef.current);
+      autosaveTimerRef.current = null;
+    }
+
+    setAutosaveStatus('saving');
+    try {
+      saveEntry(current);
+      dirtyRef.current = false;
+      setLastSaved(new Date());
+      setAutosaveStatus('saved');
+    } catch (error) {
+      console.error('Autosave failed:', error);
+      setAutosaveStatus('error');
+    }
+  }, []);
+
+  // Debounced autosave: any field edit marks the entry dirty and schedules a
+  // write. The most recent edit wins. We also flush on unmount and whenever
+  // the user navigates away via beforeunload.
   useEffect(() => {
-    if (entry && courseId) {
-      setSectionSources(getSources(courseId, entry.sectionId));
-    }
-  }, [entry?.sectionId, courseId]);
-
-  const handleSave = useCallback(() => {
     if (!entry) return;
-    
-    setSaving(true);
-    saveEntry(entry);
-    setLastSaved(new Date());
-    setSaving(false);
-  }, [entry]);
+    if (!dirtyRef.current) return;
+
+    if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
+    setAutosaveStatus('pending');
+    autosaveTimerRef.current = setTimeout(flushSave, autosaveIntervalMs);
+
+    return () => {
+      if (autosaveTimerRef.current) {
+        clearTimeout(autosaveTimerRef.current);
+        autosaveTimerRef.current = null;
+      }
+    };
+  }, [entry, autosaveIntervalMs, flushSave]);
+
+  useEffect(() => {
+    const handler = () => {
+      if (dirtyRef.current) flushSave();
+    };
+    window.addEventListener('beforeunload', handler);
+    return () => {
+      window.removeEventListener('beforeunload', handler);
+      if (dirtyRef.current) flushSave();
+    };
+  }, [flushSave]);
 
   useKeyboardShortcuts({
-    save: handleSave,
+    save: flushSave,
   });
 
   const handleDelete = () => {
@@ -95,6 +245,7 @@ export default function EntryPage() {
 
   const updateField = (field: keyof JournalEntry, value: unknown) => {
     if (!entry) return;
+    dirtyRef.current = true;
     setEntry({ ...entry, [field]: value, updatedAt: new Date().toISOString() });
   };
 
@@ -460,7 +611,7 @@ export default function EntryPage() {
           sectionId={entry.sectionId}
           onSave={(newSource) => {
             saveSource(newSource);
-            setSectionSources(getSources(courseId, entry.sectionId));
+            setSourcesRefreshKey((k) => k + 1);
             setShowQuickAddSource(false);
           }}
           onCancel={() => setShowQuickAddSource(false)}
@@ -516,51 +667,48 @@ export default function EntryPage() {
                   alert('Mark at least one source as "completed" to draft from sources.');
                   return;
                 }
-                
-                let draft = `## Sources Summary for ${course.sectionLabel} ${section?.number}\n\n`;
-                
-                completedSources.forEach((source, i) => {
-                  draft += `### ${i + 1}. ${source.title}\n`;
-                  if (source.authors) draft += `*${source.authors}*\n\n`;
-                  
-                  if (source.notes) {
-                    draft += `**Key Points:**\n${source.notes}\n\n`;
-                  }
-                  
-                  if (source.keyQuotes.length > 0) {
-                    draft += `**Notable Quotes:**\n`;
-                    source.keyQuotes.forEach(q => {
-                      draft += `> "${q.text}"${q.page ? ` (p. ${q.page})` : ''}\n`;
-                      if (q.note) draft += `> *Note: ${q.note}*\n`;
-                      draft += '\n';
-                    });
-                  }
-                  
-                  if (source.questions) {
-                    draft += `**Questions:**\n${source.questions}\n\n`;
-                  }
-                  
-                  if (source.connections) {
-                    draft += `**Connections:**\n${source.connections}\n\n`;
-                  }
-                  
-                  draft += '---\n\n';
-                });
-                
-                draft += `## My Reflection\n\n[Your synthesis and reflection here...]\n`;
-                
-                if (entry.notes && !confirm('This will replace your current notes. Continue?')) {
+
+                const hasDraftContent = [
+                  entry.notes,
+                  entry.summary,
+                  entry.keyConcepts,
+                  entry.reflection,
+                  entry.professionalApplication,
+                  entry.questions,
+                  entry.ethicalEquityConsiderations,
+                  entry.keyTakeaways,
+                ].some((value) => value.trim());
+
+                if (hasDraftContent && !confirm('This will replace your current draft fields with a structured scaffold from completed source notes. Continue?')) {
                   return;
                 }
-                
-                updateField('notes', draft);
+
+                const draft = buildStructuredDraftFromSources(completedSources, section?.title);
+                const existingResourceKeys = new Set(entry.resources.map((resource) => `${resource.title}:${resource.url || ''}`));
+                const draftResources = (draft.resources || []).filter((resource) => !existingResourceKeys.has(`${resource.title}:${resource.url || ''}`));
+
+                dirtyRef.current = true;
+                setEntry({
+                  ...entry,
+                  ...draft,
+                  resources: [...entry.resources, ...draftResources],
+                  updatedAt: new Date().toISOString(),
+                });
+
+                completedSources.forEach((source) => {
+                  saveSource({
+                    ...source,
+                    usedInEntryIds: Array.from(new Set([...(source.usedInEntryIds || []), entry.id])),
+                  });
+                });
+                setSourcesRefreshKey((k) => k + 1);
               }}
               className="w-full py-2 border border-outline dark:border-dark-outline text-ink dark:text-dark-ink hover:border-ink dark:hover:border-dark-ink font-mono text-xs uppercase tracking-wider"
             >
-              Draft from Sources
+              Generate Entry Scaffold
             </button>
             <p className="font-mono text-xs text-ink-muted dark:text-dark-ink-muted mt-1 text-center">
-              Compile notes from completed sources
+              Fill weekly journal fields from completed source notes
             </p>
           </div>
         )}
@@ -568,17 +716,13 @@ export default function EntryPage() {
         {/* Save Status */}
         <div className="mb-6">
           <button
-            onClick={handleSave}
-            disabled={saving}
+            onClick={flushSave}
+            disabled={autosaveStatus === 'saving'}
             className="w-full py-3 border-2 border-ink dark:border-dark-ink text-ink dark:text-dark-ink hover:bg-ink hover:text-inverse-on-surface dark:hover:bg-dark-ink dark:hover:text-dark-surface font-mono text-sm uppercase tracking-wider disabled:opacity-50"
           >
-            {saving ? 'Saving...' : 'Save Entry'}
+            Save Now
           </button>
-          {lastSaved && (
-            <p className="font-mono text-xs text-ink-muted dark:text-dark-ink-muted mt-2 text-center">
-              Last saved: {lastSaved.toLocaleTimeString()}
-            </p>
-          )}
+          <AutosaveStatusPill status={autosaveStatus} lastSaved={lastSaved} />
         </div>
 
         {/* Publish Toggle */}
@@ -691,6 +835,58 @@ export default function EntryPage() {
         )}
       </aside>
     </div>
+  );
+}
+
+function AutosaveStatusPill({
+  status,
+  lastSaved,
+}: {
+  status: AutosaveStatus;
+  lastSaved: Date | null;
+}) {
+  const lastSavedLabel = lastSaved
+    ? lastSaved.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+    : null;
+
+  const map: Record<AutosaveStatus, { label: string; tone: string; dot: string }> = {
+    idle: {
+      label: lastSavedLabel ? `Saved ${lastSavedLabel}` : 'Autosave armed',
+      tone: 'text-ink-muted dark:text-dark-ink-muted',
+      dot: 'bg-outline dark:bg-dark-outline',
+    },
+    pending: {
+      label: 'Unsaved changes…',
+      tone: 'text-ink dark:text-dark-ink',
+      dot: 'bg-ink dark:bg-dark-ink animate-pulse',
+    },
+    saving: {
+      label: 'Saving…',
+      tone: 'text-ink dark:text-dark-ink',
+      dot: 'bg-ink dark:bg-dark-ink animate-pulse',
+    },
+    saved: {
+      label: lastSavedLabel ? `Saved ${lastSavedLabel}` : 'Saved',
+      tone: 'text-ink dark:text-dark-ink',
+      dot: 'bg-ink dark:bg-dark-ink',
+    },
+    error: {
+      label: 'Save failed — try Save Now',
+      tone: 'text-error',
+      dot: 'bg-error',
+    },
+  };
+
+  const entry = map[status];
+  return (
+    <p
+      className={`font-mono text-xs mt-2 flex items-center justify-center gap-2 ${entry.tone}`}
+      role="status"
+      aria-live="polite"
+    >
+      <span className={`inline-block w-2 h-2 rounded-full ${entry.dot}`} aria-hidden="true" />
+      {entry.label}
+    </p>
   );
 }
 

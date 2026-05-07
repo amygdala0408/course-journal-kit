@@ -36,8 +36,8 @@ export async function fetchUrlMetadata(url: string): Promise<UrlMetadata> {
       image: data.images?.[0] || undefined,
       url,
     };
-  } catch (error) {
-    // Fallback to URL pattern detection
+  } catch {
+    // Fallback to URL pattern detection if the metadata API fails or is blocked by CORS.
     return extractMetadataFromUrl(url);
   }
 }

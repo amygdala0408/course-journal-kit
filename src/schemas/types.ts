@@ -41,6 +41,7 @@ export type CourseSection = {
   title: string;
   description?: string;
   topics: CourseTopic[];
+  requiredSources?: CourseSourceSeed[];
   outcomes?: string[];
   assignments?: Assignment[];
   keyFrameworks?: string[];
@@ -67,6 +68,15 @@ export type ResourceSeed = {
   title: string;
   url?: string;
   type: ResourceType;
+};
+
+export type CourseSourceSeed = ResourceSeed & {
+  id: string;
+  authors?: string;
+  citation?: string;
+  required?: boolean;
+  uploadRequired?: boolean;
+  notes?: string;
 };
 
 export type Rubric = {
@@ -173,11 +183,19 @@ export type CourseSource = {
   id: string;
   courseId: string;
   sectionId: string;
+  syllabusSourceId?: string;
   title: string;
   authors?: string;
   url?: string;
   type: ResourceType;
   citation?: string;
+  sourceOrigin?: 'syllabus' | 'manual' | 'suggested';
+  required?: boolean;
+  uploadRequired?: boolean;
+  attachmentName?: string;
+  attachmentDataUrl?: string;
+  attachmentMimeType?: string;
+  usedInEntryIds?: string[];
   isAssigned: boolean;
   isSupplementary: boolean;
   readingStatus: 'unread' | 'in-progress' | 'completed';
@@ -319,6 +337,7 @@ export type JournalData = {
   reviewCards: ReviewCard[];
   syntheses: FinalSynthesis[];
   sources: CourseSource[];
+  customCoursePacks: CoursePack[];
   settings: UserSettings;
 };
 

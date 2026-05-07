@@ -1,7 +1,16 @@
 import { useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { getCoursePack } from '../course-packs';
-import { getEntries, getFurtherExplorationAreas, getSyntheses, getSettings, exportJournalData, importJournalData, exportPublishedJournal } from '../utils/storage';
+import {
+  getEntries,
+  getFurtherExplorationAreas,
+  getSyntheses,
+  getSettings,
+  exportJournalData,
+  importJournalData,
+  exportPublishedJournal,
+} from '../utils/storage';
+import type { ImportMode, ImportResult } from '../utils/storage';
 import { journalToMarkdown, downloadMarkdown, downloadJSON, printToPDF } from '../utils/export';
 
 export default function ExportPage() {
@@ -13,8 +22,10 @@ export default function ExportPage() {
   const settings = getSettings();
 
   const [importText, setImportText] = useState('');
-  const [importStatus, setImportStatus] = useState<'idle' | 'success' | 'error'>('idle');
+  const [importMode, setImportMode] = useState<ImportMode>('merge');
+  const [importResult, setImportResult] = useState<ImportResult | null>(null);
   const [shareUrl, setShareUrl] = useState('');
+  const [copyStatus, setCopyStatus] = useState<'idle' | 'copied'>('idle');
 
   if (!course) {
     return (
@@ -45,24 +56,46 @@ export default function ExportPage() {
 
   const handleImport = () => {
     if (!importText.trim()) return;
-    
-    const success = importJournalData(importText);
-    setImportStatus(success ? 'success' : 'error');
-    
-    if (success) {
+
+    if (
+      importMode === 'replace' &&
+      !confirm(
+        'Replace will overwrite ALL local journal data with the contents of this backup. Existing entries that are not in the backup will be deleted. Continue?'
+      )
+    ) {
+      return;
+    }
+
+    const result = importJournalData(importText, importMode);
+    setImportResult(result);
+
+    if (result.success) {
       setImportText('');
       setTimeout(() => {
         window.location.reload();
-      }, 1500);
+      }, 2000);
     }
   };
 
-  const generateShareUrl = () => {
+  const generateShareUrl = async () => {
     const baseUrl = window.location.origin;
     const url = `${baseUrl}/public/${course.id}`;
     setShareUrl(url);
-    navigator.clipboard.writeText(url);
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopyStatus('copied');
+      setTimeout(() => setCopyStatus('idle'), 2000);
+    } catch (error) {
+      console.error('Could not copy share link:', error);
+    }
   };
+
+  const totalAdded = importResult
+    ? Object.values(importResult.added).reduce((a, b) => a + b, 0)
+    : 0;
+  const totalUpdated = importResult
+    ? Object.values(importResult.updated).reduce((a, b) => a + b, 0)
+    : 0;
 
   return (
     <div className="p-8 max-w-4xl mx-auto">
@@ -109,14 +142,16 @@ export default function ExportPage() {
           Share Public Journal
         </h2>
         <p className="text-sm text-ink-muted dark:text-dark-ink-muted mb-4">
-          Generate a shareable link to your public journal. Only published entries will be visible.
+          The link below opens a clean, read-only view of your <strong>published</strong> entries plus
+          your further-exploration areas and final synthesis. Drafts stay private. Only people you
+          send the link to can find it.
         </p>
-        <div className="flex gap-3">
+        <div className="flex flex-wrap gap-3">
           <button
             onClick={generateShareUrl}
             className="px-4 py-2 border-2 border-ink dark:border-dark-ink text-ink dark:text-dark-ink hover:bg-ink hover:text-inverse-on-surface dark:hover:bg-dark-ink dark:hover:text-dark-surface font-mono text-sm"
           >
-            Generate & Copy Link
+            {copyStatus === 'copied' ? 'Link copied ✓' : 'Copy Public Link'}
           </button>
           <Link
             to={`/public/${course.id}`}
@@ -129,7 +164,11 @@ export default function ExportPage() {
         {shareUrl && (
           <div className="mt-4 p-3 bg-surface-container dark:bg-dark-surface-container">
             <p className="font-mono text-sm text-ink dark:text-dark-ink break-all">{shareUrl}</p>
-            <p className="font-mono text-xs text-ink-muted dark:text-dark-ink-muted mt-1">Link copied to clipboard!</p>
+            <p className="font-mono text-xs text-ink-muted dark:text-dark-ink-muted mt-1">
+              {publishedEntries.length === 0
+                ? 'Heads up: you have no published entries yet, so this page will look empty until you publish at least one.'
+                : `Showing ${publishedEntries.length} published entr${publishedEntries.length === 1 ? 'y' : 'ies'}.`}
+            </p>
           </div>
         )}
       </section>
@@ -203,8 +242,49 @@ export default function ExportPage() {
           Import Backup
         </h2>
         <p className="text-sm text-ink-muted dark:text-dark-ink-muted mb-4">
-          Paste a previously exported JSON backup to restore your data. This will merge with existing data.
+          Paste a previously exported JSON backup to restore your data. Choose how to combine it with what you have today.
         </p>
+
+        <fieldset className="mb-4 space-y-2">
+          <legend className="font-mono text-xs uppercase tracking-wider text-ink-muted dark:text-dark-ink-muted mb-1">
+            Import mode
+          </legend>
+          <label className="flex items-start gap-3 cursor-pointer">
+            <input
+              type="radio"
+              name="import-mode"
+              value="merge"
+              checked={importMode === 'merge'}
+              onChange={() => setImportMode('merge')}
+              className="mt-1"
+            />
+            <span className="text-sm text-ink dark:text-dark-ink">
+              <strong>Merge</strong>{' '}
+              <span className="text-ink-muted dark:text-dark-ink-muted">
+                — keep my current data and add anything new. Items with the same id keep the more
+                recently updated copy. Default tags from both sides are combined.
+              </span>
+            </span>
+          </label>
+          <label className="flex items-start gap-3 cursor-pointer">
+            <input
+              type="radio"
+              name="import-mode"
+              value="replace"
+              checked={importMode === 'replace'}
+              onChange={() => setImportMode('replace')}
+              className="mt-1"
+            />
+            <span className="text-sm text-ink dark:text-dark-ink">
+              <strong>Replace</strong>{' '}
+              <span className="text-ink-muted dark:text-dark-ink-muted">
+                — wipe my current local data and use the backup as the new source of truth. Only
+                use this when restoring on a fresh machine or after intentional data loss.
+              </span>
+            </span>
+          </label>
+        </fieldset>
+
         <textarea
           value={importText}
           onChange={(e) => setImportText(e.target.value)}
@@ -212,21 +292,41 @@ export default function ExportPage() {
           rows={6}
           className="w-full p-4 border border-ink dark:border-dark-ink bg-transparent text-ink dark:text-dark-ink font-mono text-sm mb-4"
         />
-        <div className="flex items-center gap-4">
+        <div className="flex items-center gap-4 flex-wrap">
           <button
             onClick={handleImport}
             disabled={!importText.trim()}
             className="px-4 py-2 border-2 border-ink dark:border-dark-ink text-ink dark:text-dark-ink hover:bg-ink hover:text-inverse-on-surface dark:hover:bg-dark-ink dark:hover:text-dark-surface font-mono text-sm disabled:opacity-50"
           >
-            Import Data
+            {importMode === 'merge' ? 'Merge Backup' : 'Replace With Backup'}
           </button>
-          {importStatus === 'success' && (
-            <span className="font-mono text-sm text-ink dark:text-dark-ink">✓ Import successful! Reloading...</span>
+          {importResult?.success && (
+            <span className="font-mono text-sm text-ink dark:text-dark-ink">
+              ✓ {importResult.mode === 'replace'
+                ? `Replaced data with ${totalAdded} record${totalAdded === 1 ? '' : 's'}.`
+                : `Added ${totalAdded}, updated ${totalUpdated}.`}{' '}
+              Reloading…
+            </span>
           )}
-          {importStatus === 'error' && (
-            <span className="font-mono text-sm text-error">✗ Import failed. Check JSON format.</span>
+          {importResult && !importResult.success && (
+            <span className="font-mono text-sm text-error">
+              ✗ {importResult.error || 'Import failed. Check JSON format.'}
+            </span>
           )}
         </div>
+        {importResult?.success && importResult.mode === 'merge' && (
+          <details className="mt-4 font-mono text-xs text-ink-muted dark:text-dark-ink-muted">
+            <summary className="cursor-pointer">Merge breakdown</summary>
+            <ul className="mt-2 space-y-1">
+              <li>Entries: +{importResult.added.entries} new, {importResult.updated.entries} updated</li>
+              <li>Sources: +{importResult.added.sources} new, {importResult.updated.sources} updated</li>
+              <li>Exploration areas: +{importResult.added.explorationAreas} new, {importResult.updated.explorationAreas} updated</li>
+              <li>Review cards: +{importResult.added.reviewCards} new, {importResult.updated.reviewCards} updated</li>
+              <li>Syntheses: +{importResult.added.syntheses} new, {importResult.updated.syntheses} updated</li>
+              <li>Course packs: +{importResult.added.customCoursePacks} new, {importResult.updated.customCoursePacks} updated</li>
+            </ul>
+          </details>
+        )}
       </section>
 
       {/* Deployment Instructions */}

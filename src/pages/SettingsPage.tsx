@@ -90,18 +90,26 @@ export default function SettingsPage() {
           </h2>
           <div>
             <label className="font-mono text-xs uppercase tracking-wider text-ink-muted dark:text-dark-ink-muted block mb-2">
-              Auto-save Interval (seconds)
+              Autosave debounce (seconds)
             </label>
             <input
               type="number"
-              min="10"
-              max="300"
-              value={settings.autoSaveInterval / 1000}
-              onChange={(e) => setSettings({ ...settings, autoSaveInterval: parseInt(e.target.value) * 1000 || 30000 })}
+              min="1"
+              max="60"
+              value={Math.max(1, Math.round(settings.autoSaveInterval / 1000))}
+              onChange={(e) =>
+                setSettings({
+                  ...settings,
+                  autoSaveInterval: Math.min(60, Math.max(1, parseInt(e.target.value) || 2)) * 1000,
+                })
+              }
               className="w-32 p-3 border border-ink dark:border-dark-ink bg-transparent text-ink dark:text-dark-ink"
             />
             <p className="font-mono text-xs text-ink-muted dark:text-dark-ink-muted mt-2">
-              How often to auto-save your work (10-300 seconds).
+              How long to wait after your last keystroke before writing to local storage. Smaller
+              values (1–3 s) feel snappier; larger values reduce write churn. Saves also trigger on
+              <kbd className="px-1 mx-1 border border-outline dark:border-dark-outline">⌘/Ctrl + S</kbd>
+              and when you leave the page.
             </p>
           </div>
         </section>
@@ -123,7 +131,8 @@ export default function SettingsPage() {
               className="w-full p-3 border border-ink dark:border-dark-ink bg-transparent text-ink dark:text-dark-ink"
             />
             <p className="font-mono text-xs text-ink-muted dark:text-dark-ink-muted mt-2">
-              These tags will be suggested when creating new entries.
+              These are auto-applied to every <strong>new</strong> entry, alongside the course code
+              and section number. Existing entries are not affected. Spaces become hyphens.
             </p>
           </div>
         </section>

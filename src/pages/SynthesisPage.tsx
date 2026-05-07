@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { v4 as uuidv4 } from 'uuid';
 import { getCoursePack } from '../course-packs';
@@ -30,11 +30,12 @@ export default function SynthesisPage() {
 
   const [saving, setSaving] = useState(false);
 
-  useEffect(() => {
-    if (courseId && synthesis.courseId !== courseId) {
-      setSynthesis((prev) => ({ ...prev, courseId }));
-    }
-  }, [courseId, synthesis.courseId]);
+  // Always persist with the URL's courseId so renaming or re-routing doesn't
+  // strand a synthesis on a stale id. Keeps state derivation in render rather
+  // than firing a setState-in-effect cascade.
+  const effectiveSynthesis: FinalSynthesis = courseId && synthesis.courseId !== courseId
+    ? { ...synthesis, courseId }
+    : synthesis;
 
   if (!course) {
     return (
@@ -47,7 +48,8 @@ export default function SynthesisPage() {
 
   const handleSave = () => {
     setSaving(true);
-    saveSynthesis(synthesis);
+    saveSynthesis(effectiveSynthesis);
+    setSynthesis(effectiveSynthesis);
     setSaving(false);
   };
 

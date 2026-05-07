@@ -1,22 +1,36 @@
-import { useParams } from 'react-router-dom';
-import { getCoursePack } from '../course-packs';
+import { Link, useParams } from 'react-router-dom';
+import { getCoursePack, getCoursePacks } from '../course-packs';
 import { getEntries, getFurtherExplorationAreas, getSyntheses, getSettings } from '../utils/storage';
 
 export default function PublicPage() {
-  const { courseId } = useParams<{ courseId: string }>();
-  const course = courseId ? getCoursePack(courseId) : null;
-  const allEntries = courseId ? getEntries(courseId) : [];
+  const { courseId, shareId } = useParams<{ courseId?: string; shareId?: string }>();
+  // The /share/:shareId route is reserved for future signed-share links. For now,
+  // we treat the share id as a courseId so existing links keep working and any
+  // future hashing/decoding can hook in here.
+  const resolvedCourseId = courseId || shareId;
+  const course = resolvedCourseId
+    ? getCoursePack(resolvedCourseId) || getCoursePacks().find((c) => c.id === resolvedCourseId)
+    : null;
+  const allEntries = course ? getEntries(course.id) : [];
   const entries = allEntries.filter((e) => e.published);
-  const explorationAreas = courseId ? getFurtherExplorationAreas(courseId) : [];
-  const syntheses = courseId ? getSyntheses(courseId) : [];
+  const explorationAreas = course ? getFurtherExplorationAreas(course.id) : [];
+  const syntheses = course ? getSyntheses(course.id) : [];
   const settings = getSettings();
 
   if (!course) {
     return (
-      <div className="min-h-screen bg-surface flex items-center justify-center">
-        <div className="text-center">
+      <div className="min-h-screen bg-surface flex items-center justify-center p-8">
+        <div className="text-center max-w-md">
           <h1 className="font-editorial text-2xl text-ink mb-4">Journal not found</h1>
-          <p className="text-ink-muted">This journal may not exist or has not been published.</p>
+          <p className="text-ink-muted mb-6">
+            This link may be for a course that hasn't been installed yet, or the course id is wrong.
+          </p>
+          <Link
+            to="/"
+            className="inline-block px-4 py-2 border border-ink text-ink hover:bg-ink hover:text-inverse-on-surface font-mono text-sm uppercase tracking-wider"
+          >
+            Open Course Journal Kit
+          </Link>
         </div>
       </div>
     );
@@ -96,8 +110,27 @@ export default function PublicPage() {
       {/* Content */}
       <main className="max-w-4xl mx-auto p-8 print:p-4">
         {entries.length === 0 ? (
-          <div className="text-center py-16">
-            <p className="text-ink-muted">No published entries yet.</p>
+          <div className="border-2 border-dashed border-outline p-12 text-center my-12 max-w-2xl mx-auto">
+            <h2 className="font-editorial text-2xl text-ink mb-3">Nothing published yet</h2>
+            <p className="text-ink-muted mb-6">
+              This journal exists but no entries have been marked as <strong>published</strong>. Open the
+              entry you want to share, toggle <em>Published</em> in the sidebar, and the entry will
+              appear here automatically.
+            </p>
+            <div className="flex justify-center gap-3 flex-wrap no-print">
+              <Link
+                to={`/course/${course.id}`}
+                className="inline-block px-4 py-2 border border-ink text-ink hover:bg-ink hover:text-inverse-on-surface font-mono text-sm uppercase tracking-wider"
+              >
+                Open course in editor
+              </Link>
+              <Link
+                to={`/course/${course.id}/export`}
+                className="inline-block px-4 py-2 border border-outline text-ink-muted hover:border-ink hover:text-ink font-mono text-sm uppercase tracking-wider"
+              >
+                Manage share link
+              </Link>
+            </div>
           </div>
         ) : (
           <>
