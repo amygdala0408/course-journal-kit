@@ -1,7 +1,8 @@
 import { useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { downloadJSON } from '../utils/export';
-import type { CoursePack, CourseSection, CourseTopic, CourseOutcome, ReflectionLens, RubricCheck } from '../schemas/types';
+import { installCustomCoursePack } from '../utils/storage';
+import type { CoursePack, CourseSection, CourseTopic, CourseOutcome, ReflectionLens, RubricCheck, CourseSourceSeed, ResourceType } from '../schemas/types';
 import { v4 as uuidv4 } from 'uuid';
 
 const emptyCourse: CoursePack = {
@@ -24,10 +25,199 @@ const emptyCourse: CoursePack = {
   reflectionLenses: [],
 };
 
+function slugify(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/&/g, 'and')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 64);
+}
+
+function extractUrl(value: string): string | undefined {
+  return value.match(/https?:\/\/[^\s)]+/i)?.[0];
+}
+
+function inferResourceType(value: string): ResourceType {
+  const lower = value.toLowerCase();
+  if (lower.includes('youtube.com') || lower.includes('youtu.be') || lower.includes('video')) return 'video';
+  if (lower.includes('podcast')) return 'podcast';
+  if (lower.includes('.pdf') || lower.includes('slides') || lower.includes('handout')) return 'document';
+  if (lower.includes('book') || lower.includes('chapter')) return 'book';
+  if (lower.includes('article') || lower.includes('journal') || lower.includes('doi.org')) return 'article';
+  return 'website';
+}
+
+function cleanSourceTitle(value: string): string {
+  return value
+    .replace(/^[-*•\d.)\s]+/, '')
+    .replace(/https?:\/\/[^\s)]+/i, '')
+    .replace(/\b(required reading|reading|source|resource|article|chapter)\b\s*:?\s*/i, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function looksLikeSourceLine(line: string): boolean {
+  const lower = line.toLowerCase();
+  return Boolean(
+    extractUrl(line) ||
+      lower.includes('reading') ||
+      lower.includes('article') ||
+      lower.includes('chapter') ||
+      lower.includes('book') ||
+      lower.includes('pdf') ||
+      lower.includes('slides') ||
+      lower.includes('doi.org')
+  );
+}
+
+function looksLikeOutcomeLine(line: string): boolean {
+  return /\b(outcome|objective|students will|learners will|you will|lo\d)\b/i.test(line);
+}
+
+function parseSyllabusToCoursePack(text: string): CoursePack {
+  const lines = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  const firstMeaningfulLine = lines.find((line) => !/^(syllabus|course schedule)$/i.test(line)) || 'Imported Course';
+  const codeMatch = text.match(/\b[A-Z]{2,5}\s?\d{3,4}[A-Z]?\b/);
+  const sectionLabel = /\bweek\s+\d+/i.test(text) ? 'Week' : 'Module';
+  const title = firstMeaningfulLine.length > 6 ? firstMeaningfulLine : codeMatch?.[0] || 'Imported Course';
+  const courseId = slugify(codeMatch?.[0] || title) || `course-${Date.now()}`;
+
+  const sections: CourseSection[] = [];
+  const outcomes: CourseOutcome[] = [];
+  let currentSection: CourseSection | null = null;
+  let sourceCounter = 1;
+
+  const ensureSection = (titleValue: string, number?: number) => {
+    const sectionNumber = number || sections.length + 1;
+    const section: CourseSection = {
+      id: `${sectionLabel.toLowerCase()}-${sectionNumber}`,
+      number: sectionNumber,
+      title: titleValue || `${sectionLabel} ${sectionNumber}`,
+      description: '',
+      topics: [],
+      requiredSources: [],
+      keyFrameworks: [],
+    };
+    sections.push(section);
+    currentSection = section;
+  };
+
+  lines.forEach((line) => {
+    const sectionMatch = line.match(/^(module|week|unit|chapter|session)\s+(\d+)\s*[:\-–]?\s*(.*)$/i);
+    if (sectionMatch) {
+      ensureSection(sectionMatch[3]?.trim() || `${sectionMatch[1]} ${sectionMatch[2]}`, Number(sectionMatch[2]));
+      return;
+    }
+
+    const numberedScheduleMatch = line.match(/^(\d{1,2})[.)]\s+(.{8,})$/);
+    if (!currentSection && numberedScheduleMatch) {
+      ensureSection(numberedScheduleMatch[2], Number(numberedScheduleMatch[1]));
+      return;
+    }
+
+    if (looksLikeOutcomeLine(line) && outcomes.length < 12) {
+      outcomes.push({
+        id: `lo${outcomes.length + 1}`,
+        label: `LO${outcomes.length + 1}`,
+        text: line.replace(/^[-*•\d.)\s]+/, ''),
+      });
+    }
+
+    if (!currentSection && sections.length === 0 && looksLikeSourceLine(line)) {
+      ensureSection(`${sectionLabel} 1`, 1);
+    }
+
+    if (currentSection && looksLikeSourceLine(line)) {
+      const url = extractUrl(line);
+      const titleValue = cleanSourceTitle(line) || `Source ${sourceCounter}`;
+      const source: CourseSourceSeed = {
+        id: `syllabus-source-${sourceCounter}`,
+        title: titleValue,
+        url,
+        type: inferResourceType(line),
+        required: true,
+        uploadRequired: !url,
+        notes: url ? 'Imported from syllabus link.' : 'Imported from syllabus. Add a link or upload the hard copy.',
+      };
+      currentSection.requiredSources = [...(currentSection.requiredSources || []), source];
+      sourceCounter += 1;
+      return;
+    }
+
+    if (currentSection && currentSection.topics.length < 8 && line.length < 120 && !/^(required|readings?|assignments?|due|schedule)$/i.test(line)) {
+      currentSection.topics.push({
+        id: `topic-${uuidv4().slice(0, 8)}`,
+        title: line.replace(/^[-*•\d.)\s]+/, ''),
+        required: false,
+      });
+    }
+  });
+
+  if (sections.length === 0) {
+    ensureSection(`${sectionLabel} 1`, 1);
+  }
+
+  return {
+    ...emptyCourse,
+    id: courseId,
+    title,
+    code: codeMatch?.[0] || '',
+    sectionLabel,
+    outcomes,
+    sections,
+    reflectionLenses: [
+      { id: 'conceptual-understanding', label: 'Conceptual Understanding', description: 'What ideas, theories, and frameworks matter most?' },
+      { id: 'professional-practice', label: 'Professional Practice', description: 'How does this apply to real work or teaching practice?' },
+      { id: 'ethical-equity', label: 'Ethics & Equity', description: 'Who benefits, who is excluded, and what responsibilities follow?' },
+    ],
+    rubrics: [{
+      id: 'syllabus-readiness',
+      title: 'Journal Readiness',
+      totalPoints: 25,
+      checks: [
+        { id: 'sources-noted', label: 'Sources Noted', description: 'Required sources include notes, quotes, or questions before drafting.', points: 5 },
+        { id: 'reflection-depth', label: 'Reflection Depth', description: 'Entries move beyond summary into interpretation and professional meaning.', points: 5 },
+        { id: 'connections', label: 'Connections', description: 'Entries connect readings, course outcomes, and practice.', points: 5 },
+        { id: 'equity-ethics', label: 'Equity & Ethics', description: 'Entries address equity, access, ethics, or learner impact where relevant.', points: 5 },
+        { id: 'publication-ready', label: 'Publication Ready', description: 'Entries are complete, polished, cited, and ready for the public journal.', points: 5 },
+      ],
+    }],
+  };
+}
+
+function prepareCourseForInstall(course: CoursePack): CoursePack {
+  const id = course.id || course.code?.toLowerCase().replace(/\s+/g, '-') || slugify(course.title) || `course-${Date.now()}`;
+
+  return {
+    ...course,
+    id,
+    title: course.title || 'Untitled Course',
+    sections: course.sections.map((section, index) => ({
+      ...section,
+      number: section.number || index + 1,
+      requiredSources: (section.requiredSources || []).map((source, sourceIndex) => ({
+        ...source,
+        id: source.id || `${section.id || `section-${index + 1}`}-source-${sourceIndex + 1}`,
+        type: source.type || 'article',
+        required: source.required ?? true,
+        uploadRequired: source.uploadRequired ?? !source.url,
+      })),
+    })),
+  };
+}
+
 export default function CourseBuilderPage() {
+  const navigate = useNavigate();
   const [course, setCourse] = useState<CoursePack>(emptyCourse);
   const [importText, setImportText] = useState('');
-  const [activeTab, setActiveTab] = useState<'basic' | 'sections' | 'outcomes' | 'lenses' | 'rubric' | 'import'>('basic');
+  const [syllabusText, setSyllabusText] = useState('');
+  const [installMessage, setInstallMessage] = useState('');
+  const [activeTab, setActiveTab] = useState<'basic' | 'syllabus' | 'sections' | 'outcomes' | 'lenses' | 'rubric' | 'import'>('basic');
 
   const updateCourse = (updates: Partial<CoursePack>) => {
     setCourse({ ...course, ...updates });
@@ -40,6 +230,7 @@ export default function CourseBuilderPage() {
       title: '',
       description: '',
       topics: [],
+      requiredSources: [],
       keyFrameworks: [],
     };
     updateCourse({ sections: [...course.sections, newSection] });
@@ -151,6 +342,27 @@ export default function CourseBuilderPage() {
     downloadJSON(exportCourse, `${exportCourse.id}-course-pack`);
   };
 
+  const handleInstall = () => {
+    const installableCourse = prepareCourseForInstall(course);
+    const sourceCount = installCustomCoursePack(installableCourse);
+    setCourse(installableCourse);
+    setInstallMessage(`Installed ${installableCourse.title} with ${sourceCount} syllabus source${sourceCount === 1 ? '' : 's'}.`);
+    navigate(`/course/${installableCourse.id}`);
+  };
+
+  const handleSyllabusFile = async (file?: File) => {
+    if (!file) return;
+    const text = await file.text();
+    setSyllabusText(text);
+  };
+
+  const handleParseSyllabus = () => {
+    if (!syllabusText.trim()) return;
+    setCourse(parseSyllabusToCoursePack(syllabusText));
+    setInstallMessage('');
+    setActiveTab('sections');
+  };
+
   const handleImport = () => {
     try {
       const imported = JSON.parse(importText) as CoursePack;
@@ -193,6 +405,7 @@ Schema:
     "title": "string",
     "description": "string (optional)",
     "topics": [{ "id": "string", "title": "string", "required": boolean }],
+    "requiredSources": [{ "id": "string", "title": "string", "url": "string (optional)", "type": "article|book|video|podcast|website|document|other", "required": true, "uploadRequired": boolean }],
     "keyFrameworks": ["string"]
   }],
   "reflectionLenses": [{ "id": "string", "label": "string", "description": "string" }],
@@ -215,7 +428,7 @@ Syllabus:
 
       {/* Tabs */}
       <div className="flex gap-2 mb-8 flex-wrap">
-        {(['basic', 'sections', 'outcomes', 'lenses', 'rubric', 'import'] as const).map((tab) => (
+        {(['basic', 'syllabus', 'sections', 'outcomes', 'lenses', 'rubric', 'import'] as const).map((tab) => (
           <button
             key={tab}
             onClick={() => setActiveTab(tab)}
@@ -341,6 +554,56 @@ Syllabus:
         </div>
       )}
 
+      {/* Syllabus Import */}
+      {activeTab === 'syllabus' && (
+        <div className="space-y-6">
+          <div className="p-4 bg-surface-container dark:bg-dark-surface-container border border-outline dark:border-dark-outline">
+            <h2 className="font-mono text-sm text-ink dark:text-dark-ink mb-2">
+              Upload or paste a syllabus
+            </h2>
+            <p className="text-sm text-ink-muted dark:text-dark-ink-muted">
+              This creates a draft course structure and turns detected readings, links, chapters, PDFs, and slide decks into module sources. Review the draft before installing it.
+            </p>
+          </div>
+
+          <div>
+            <label className="font-mono text-xs uppercase tracking-wider text-ink-muted dark:text-dark-ink-muted block mb-2">
+              Text syllabus file
+            </label>
+            <input
+              type="file"
+              accept=".txt,.md,.csv"
+              onChange={(event) => handleSyllabusFile(event.target.files?.[0])}
+              className="block w-full p-3 border border-ink dark:border-dark-ink text-ink dark:text-dark-ink"
+            />
+            <p className="font-mono text-xs text-ink-muted dark:text-dark-ink-muted mt-2">
+              For PDFs or scans, copy/paste the text below for now. Hard-copy readings will be marked as upload needed.
+            </p>
+          </div>
+
+          <div>
+            <label className="font-mono text-xs uppercase tracking-wider text-ink-muted dark:text-dark-ink-muted block mb-2">
+              Syllabus text
+            </label>
+            <textarea
+              value={syllabusText}
+              onChange={(e) => setSyllabusText(e.target.value)}
+              rows={16}
+              placeholder="Paste syllabus schedule, readings, assignments, and rubric details here..."
+              className="w-full p-3 border border-ink dark:border-dark-ink bg-transparent text-ink dark:text-dark-ink font-mono text-sm"
+            />
+          </div>
+
+          <button
+            onClick={handleParseSyllabus}
+            disabled={!syllabusText.trim()}
+            className="px-6 py-3 border-2 border-ink dark:border-dark-ink text-ink dark:text-dark-ink hover:bg-ink hover:text-inverse-on-surface dark:hover:bg-dark-ink dark:hover:text-dark-surface font-mono text-sm uppercase tracking-wider disabled:opacity-50"
+          >
+            Generate Guided Course Draft
+          </button>
+        </div>
+      )}
+
       {/* Sections */}
       {activeTab === 'sections' && (
         <div className="space-y-6">
@@ -400,6 +663,31 @@ Syllabus:
                   </div>
                 ))}
               </div>
+
+              {(section.requiredSources?.length || 0) > 0 && (
+                <div className="ml-4 mt-4 pt-4 border-t border-outline dark:border-dark-outline">
+                  <span className="font-mono text-xs text-ink-muted dark:text-dark-ink-muted block mb-2">
+                    Syllabus Sources ({section.requiredSources?.length || 0})
+                  </span>
+                  <div className="space-y-2">
+                    {section.requiredSources?.map((source) => (
+                      <div key={source.id} className="flex items-start justify-between gap-3 p-2 border border-outline dark:border-dark-outline">
+                        <div>
+                          <p className="text-sm text-ink dark:text-dark-ink">{source.title}</p>
+                          <p className="font-mono text-xs text-ink-muted dark:text-dark-ink-muted">
+                            {source.url ? 'Link found' : 'Upload/link needed'} · {source.type}
+                          </p>
+                        </div>
+                        {source.uploadRequired && (
+                          <span className="font-mono text-xs px-2 py-1 border border-error text-error">
+                            Needs file
+                          </span>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           ))}
         </div>
@@ -536,7 +824,14 @@ Syllabus:
       )}
 
       {/* Export */}
-      <div className="mt-12 pt-8 border-t border-outline dark:border-dark-outline flex gap-4">
+      <div className="mt-12 pt-8 border-t border-outline dark:border-dark-outline flex gap-4 flex-wrap items-center">
+        <button
+          onClick={handleInstall}
+          disabled={!course.title}
+          className="px-6 py-3 border-2 border-ink dark:border-dark-ink bg-ink text-inverse-on-surface dark:bg-dark-ink dark:text-dark-surface hover:bg-transparent hover:text-ink dark:hover:bg-transparent dark:hover:text-dark-ink font-mono text-sm uppercase tracking-wider disabled:opacity-50"
+        >
+          Install Course & Seed Sources
+        </button>
         <button
           onClick={handleExport}
           disabled={!course.title}
@@ -550,6 +845,9 @@ Syllabus:
         >
           Back to Home
         </Link>
+        {installMessage && (
+          <span className="font-mono text-sm text-ink dark:text-dark-ink">{installMessage}</span>
+        )}
       </div>
     </div>
   );

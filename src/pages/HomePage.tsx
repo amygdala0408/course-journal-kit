@@ -1,9 +1,11 @@
 import { Link } from 'react-router-dom';
-import { coursePacks } from '../course-packs';
+import { getCoursePacks } from '../course-packs';
 import { getEntries } from '../utils/storage';
 import { calculateCourseProgress } from '../utils/progress';
 
 export default function HomePage() {
+  const coursePacks = getCoursePacks();
+
   return (
     <div className="p-8 max-w-5xl mx-auto">
       {/* Header */}

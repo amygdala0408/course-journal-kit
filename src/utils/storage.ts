@@ -1,6 +1,7 @@
 // localStorage utilities for Course Journal Kit
 
 import type {
+  CoursePack,
   JournalData,
   JournalEntry,
   FurtherExplorationArea,
@@ -33,8 +34,18 @@ const defaultJournalData: JournalData = {
   reviewCards: [],
   syntheses: [],
   sources: [],
+  customCoursePacks: [],
   settings: defaultSettings,
 };
+
+function createId(prefix: string): string {
+  const randomId =
+    typeof crypto !== 'undefined' && 'randomUUID' in crypto
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+
+  return `${prefix}-${randomId}`;
+}
 
 // ============================================
 // LOAD / SAVE
@@ -42,6 +53,7 @@ const defaultJournalData: JournalData = {
 
 export function loadJournalData(): JournalData {
   try {
+    if (typeof localStorage === 'undefined') return defaultJournalData;
     const stored = localStorage.getItem(STORAGE_KEYS.JOURNAL_DATA);
     if (!stored) return defaultJournalData;
     
@@ -49,6 +61,12 @@ export function loadJournalData(): JournalData {
     return {
       ...defaultJournalData,
       ...parsed,
+      entries: parsed.entries || [],
+      furtherExplorationAreas: parsed.furtherExplorationAreas || [],
+      reviewCards: parsed.reviewCards || [],
+      syntheses: parsed.syntheses || [],
+      sources: parsed.sources || [],
+      customCoursePacks: parsed.customCoursePacks || [],
       settings: { ...defaultSettings, ...parsed.settings },
     };
   } catch (error) {
@@ -59,10 +77,100 @@ export function loadJournalData(): JournalData {
 
 export function saveJournalData(data: JournalData): void {
   try {
+    if (typeof localStorage === 'undefined') return;
     localStorage.setItem(STORAGE_KEYS.JOURNAL_DATA, JSON.stringify(data));
   } catch (error) {
     console.error('Failed to save journal data:', error);
   }
+}
+
+// ============================================
+// CUSTOM COURSE PACKS
+// ============================================
+
+export function getCustomCoursePacks(): CoursePack[] {
+  return loadJournalData().customCoursePacks || [];
+}
+
+export function getCustomCoursePack(courseId: string): CoursePack | undefined {
+  return getCustomCoursePacks().find((course) => course.id === courseId);
+}
+
+export function saveCustomCoursePack(coursePack: CoursePack): void {
+  const data = loadJournalData();
+  const existingIndex = data.customCoursePacks.findIndex((course) => course.id === coursePack.id);
+
+  if (existingIndex >= 0) {
+    data.customCoursePacks[existingIndex] = coursePack;
+  } else {
+    data.customCoursePacks.push(coursePack);
+  }
+
+  saveJournalData(data);
+}
+
+export function deleteCustomCoursePack(courseId: string): void {
+  const data = loadJournalData();
+  data.customCoursePacks = data.customCoursePacks.filter((course) => course.id !== courseId);
+  saveJournalData(data);
+}
+
+export function seedSourcesFromCoursePack(coursePack: CoursePack): number {
+  const data = loadJournalData();
+  if (!data.sources) data.sources = [];
+
+  const existingKeys = new Set(
+    data.sources
+      .filter((source) => source.courseId === coursePack.id)
+      .map((source) => source.syllabusSourceId || `${source.sectionId}:${source.title.toLowerCase()}`)
+  );
+
+  let createdCount = 0;
+  const now = new Date().toISOString();
+
+  coursePack.sections.forEach((section) => {
+    section.requiredSources?.forEach((sourceSeed) => {
+      const sourceKey = sourceSeed.id || `${section.id}:${sourceSeed.title.toLowerCase()}`;
+      if (existingKeys.has(sourceKey)) return;
+
+      data.sources.push({
+        id: createId('source'),
+        courseId: coursePack.id,
+        sectionId: section.id,
+        syllabusSourceId: sourceSeed.id,
+        title: sourceSeed.title,
+        authors: sourceSeed.authors,
+        url: sourceSeed.url,
+        type: sourceSeed.type || 'article',
+        citation: sourceSeed.citation,
+        sourceOrigin: 'syllabus',
+        required: sourceSeed.required ?? true,
+        uploadRequired: sourceSeed.uploadRequired ?? !sourceSeed.url,
+        usedInEntryIds: [],
+        isAssigned: sourceSeed.required ?? true,
+        isSupplementary: !(sourceSeed.required ?? true),
+        readingStatus: 'unread',
+        notes: sourceSeed.notes || '',
+        keyQuotes: [],
+        keyTerms: [],
+        questions: '',
+        connections: '',
+        tags: ['syllabus'],
+        addedAt: now,
+        updatedAt: now,
+      });
+      existingKeys.add(sourceKey);
+      createdCount += 1;
+    });
+  });
+
+  saveJournalData(data);
+  return createdCount;
+}
+
+export function installCustomCoursePack(coursePack: CoursePack): number {
+  saveCustomCoursePack(coursePack);
+  return seedSourcesFromCoursePack(coursePack);
 }
 
 // ============================================
@@ -258,6 +366,7 @@ export function exportPublishedJournal(courseId: string, studentName: string): P
 // ============================================
 
 export function clearAllData(): void {
+  if (typeof localStorage === 'undefined') return;
   localStorage.removeItem(STORAGE_KEYS.JOURNAL_DATA);
 }
 

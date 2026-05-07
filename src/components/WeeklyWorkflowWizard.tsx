@@ -25,6 +25,7 @@ export default function WeeklyWorkflowWizard({
   const completedSources = sources.filter(s => s.readingStatus === 'completed');
   const inProgressSources = sources.filter(s => s.readingStatus === 'in-progress');
   const sourcesWithNotes = sources.filter(s => s.notes || s.keyQuotes.length > 0);
+  const sourcesNeedingFiles = sources.filter(s => s.uploadRequired && !s.attachmentName);
   
   const steps: { id: WorkflowStep; label: string; description: string }[] = [
     { id: 'sources', label: 'Add Sources', description: 'Add your assigned readings and any supplementary sources' },
@@ -152,6 +153,11 @@ export default function WeeklyWorkflowWizard({
                     ))}
                     {sources.length > 3 && <li>• ...and {sources.length - 3} more</li>}
                   </ul>
+                )}
+                {sourcesNeedingFiles.length > 0 && (
+                  <p className="text-sm text-error mt-3">
+                    {sourcesNeedingFiles.length} syllabus source{sourcesNeedingFiles.length === 1 ? '' : 's'} still need a link or uploaded hard copy.
+                  </p>
                 )}
               </div>
               

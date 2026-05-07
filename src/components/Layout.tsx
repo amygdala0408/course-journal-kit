@@ -1,8 +1,8 @@
 import { useState } from 'react';
 import { Outlet, Link, useLocation, useParams } from 'react-router-dom';
 import { useKeyboardShortcuts, getShortcutLabel } from '../hooks/useKeyboardShortcuts';
-import { coursePacks } from '../course-packs';
-import { getSources } from '../utils/storage';
+import { getCoursePack } from '../course-packs';
+import { getEntries, getSources } from '../utils/storage';
 import WeeklyWorkflowWizard from './WeeklyWorkflowWizard';
 
 interface LayoutProps {
@@ -18,7 +18,7 @@ export default function Layout({ isDark, toggleDarkMode }: LayoutProps) {
   const location = useLocation();
   const { courseId } = useParams();
 
-  const currentCourse = courseId ? coursePacks.find((c) => c.id === courseId) : null;
+  const currentCourse = courseId ? getCoursePack(courseId) : null;
   
   // Extract current section from URL
   const sectionMatch = location.pathname.match(/\/section\/([^/]+)/);
@@ -27,6 +27,9 @@ export default function Layout({ isDark, toggleDarkMode }: LayoutProps) {
   
   // Get sources for current section (for workflow wizard)
   const sectionSources = currentSectionId && courseId ? getSources(courseId, currentSectionId) : [];
+  const hasSectionEntry = currentSectionId && courseId
+    ? getEntries(courseId).some((entry) => entry.sectionId === currentSectionId)
+    : false;
 
   useKeyboardShortcuts({
     toggleSidebar: () => setSidebarOpen((prev) => !prev),
@@ -198,7 +201,7 @@ export default function Layout({ isDark, toggleDarkMode }: LayoutProps) {
           course={currentCourse}
           sectionId={currentSectionId}
           sources={sectionSources}
-          hasEntry={false}
+          hasEntry={hasSectionEntry}
           onClose={() => setShowWorkflowWizard(false)}
         />
       )}

@@ -31,6 +31,63 @@ const emptyEntry = (courseId: string, sectionId: string): JournalEntry => ({
   published: false,
 });
 
+function buildStructuredDraftFromSources(sources: CourseSource[], sectionTitle?: string): Partial<JournalEntry> {
+  const sourceSummaries = sources.map((source, index) => {
+    const quotes = source.keyQuotes
+      .map((quote) => `- "${quote.text}"${quote.page ? ` (p. ${quote.page})` : ''}${quote.note ? ` — ${quote.note}` : ''}`)
+      .join('\n');
+
+    return [
+      `### ${index + 1}. ${source.title}`,
+      source.authors ? `Authors: ${source.authors}` : '',
+      source.notes ? `Notes:\n${source.notes}` : '',
+      quotes ? `Quotes:\n${quotes}` : '',
+      source.questions ? `Questions:\n${source.questions}` : '',
+      source.connections ? `Connections:\n${source.connections}` : '',
+    ].filter(Boolean).join('\n\n');
+  });
+
+  const keyTerms = Array.from(new Set(sources.flatMap((source) => source.keyTerms))).join(', ');
+  const combinedQuestions = sources
+    .map((source) => source.questions.trim())
+    .filter(Boolean)
+    .join('\n\n');
+  const combinedConnections = sources
+    .map((source) => source.connections.trim())
+    .filter(Boolean)
+    .join('\n\n');
+
+  return {
+    notes: [
+      `## Source Notes for ${sectionTitle || 'This Section'}`,
+      ...sourceSummaries,
+      '## My Reflection Notes',
+      '[Add your own synthesis, interpretation, and lived/professional connection here before publishing.]',
+    ].join('\n\n'),
+    summary: sources
+      .map((source) => `- ${source.title}: ${source.notes ? source.notes.split('\n')[0] : 'Add a short summary from your notes.'}`)
+      .join('\n'),
+    keyConcepts: keyTerms || '[List the concepts, frameworks, or vocabulary that emerged across these sources.]',
+    reflection: '[What changed, deepened, challenged, or complicated your thinking after working with these sources?]',
+    professionalApplication: combinedConnections || '[How could these ideas shape your professional practice, teaching, leadership, or decision-making?]',
+    questions: combinedQuestions || '[What questions do these sources raise for further inquiry or discussion?]',
+    ethicalEquityConsiderations: '[Who is affected by these ideas? What equity, access, privacy, cultural, or ethical considerations matter here?]',
+    keyTakeaways: sources
+      .map((source) => `- One takeaway from ${source.title}: [write your takeaway]`)
+      .join('\n'),
+    resources: sources.map((source) => ({
+      id: uuidv4(),
+      title: source.title,
+      url: source.url,
+      type: source.type,
+      citation: source.citation,
+      notes: source.notes,
+      addedAt: new Date().toISOString(),
+    })),
+    aiUseDisclosure: 'Draft scaffold generated from my saved source notes in Course Journal Kit; final reflection and interpretation should be revised in my own words.',
+  };
+}
+
 export default function EntryPage() {
   const { courseId, entryId } = useParams<{ courseId: string; entryId: string }>();
   const [searchParams] = useSearchParams();
@@ -516,51 +573,46 @@ export default function EntryPage() {
                   alert('Mark at least one source as "completed" to draft from sources.');
                   return;
                 }
-                
-                let draft = `## Sources Summary for ${course.sectionLabel} ${section?.number}\n\n`;
-                
-                completedSources.forEach((source, i) => {
-                  draft += `### ${i + 1}. ${source.title}\n`;
-                  if (source.authors) draft += `*${source.authors}*\n\n`;
-                  
-                  if (source.notes) {
-                    draft += `**Key Points:**\n${source.notes}\n\n`;
-                  }
-                  
-                  if (source.keyQuotes.length > 0) {
-                    draft += `**Notable Quotes:**\n`;
-                    source.keyQuotes.forEach(q => {
-                      draft += `> "${q.text}"${q.page ? ` (p. ${q.page})` : ''}\n`;
-                      if (q.note) draft += `> *Note: ${q.note}*\n`;
-                      draft += '\n';
-                    });
-                  }
-                  
-                  if (source.questions) {
-                    draft += `**Questions:**\n${source.questions}\n\n`;
-                  }
-                  
-                  if (source.connections) {
-                    draft += `**Connections:**\n${source.connections}\n\n`;
-                  }
-                  
-                  draft += '---\n\n';
-                });
-                
-                draft += `## My Reflection\n\n[Your synthesis and reflection here...]\n`;
-                
-                if (entry.notes && !confirm('This will replace your current notes. Continue?')) {
+
+                const hasDraftContent = [
+                  entry.notes,
+                  entry.summary,
+                  entry.keyConcepts,
+                  entry.reflection,
+                  entry.professionalApplication,
+                  entry.questions,
+                  entry.ethicalEquityConsiderations,
+                  entry.keyTakeaways,
+                ].some((value) => value.trim());
+
+                if (hasDraftContent && !confirm('This will replace your current draft fields with a structured scaffold from completed source notes. Continue?')) {
                   return;
                 }
-                
-                updateField('notes', draft);
+
+                const draft = buildStructuredDraftFromSources(completedSources, section?.title);
+                const existingResourceKeys = new Set(entry.resources.map((resource) => `${resource.title}:${resource.url || ''}`));
+                const draftResources = (draft.resources || []).filter((resource) => !existingResourceKeys.has(`${resource.title}:${resource.url || ''}`));
+
+                setEntry({
+                  ...entry,
+                  ...draft,
+                  resources: [...entry.resources, ...draftResources],
+                  updatedAt: new Date().toISOString(),
+                });
+
+                completedSources.forEach((source) => {
+                  saveSource({
+                    ...source,
+                    usedInEntryIds: Array.from(new Set([...(source.usedInEntryIds || []), entry.id])),
+                  });
+                });
               }}
               className="w-full py-2 border border-outline dark:border-dark-outline text-ink dark:text-dark-ink hover:border-ink dark:hover:border-dark-ink font-mono text-xs uppercase tracking-wider"
             >
-              Draft from Sources
+              Generate Entry Scaffold
             </button>
             <p className="font-mono text-xs text-ink-muted dark:text-dark-ink-muted mt-1 text-center">
-              Compile notes from completed sources
+              Fill weekly journal fields from completed source notes
             </p>
           </div>
         )}

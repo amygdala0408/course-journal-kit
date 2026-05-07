@@ -287,6 +287,10 @@ function SourceCard({
           <div className="flex gap-4 mt-2 text-xs text-ink-muted dark:text-dark-ink-muted font-mono">
             <span>{source.type}</span>
             {section && <span>{course?.sectionLabel} {section.number}</span>}
+            {source.sourceOrigin === 'syllabus' && <span>Syllabus</span>}
+            {source.uploadRequired && !source.attachmentName && <span className="text-error">Upload needed</span>}
+            {source.attachmentName && <span>File: {source.attachmentName}</span>}
+            {(source.usedInEntryIds?.length || 0) > 0 && <span>Used in entry</span>}
             {quoteCount > 0 && <span>{quoteCount} quote{quoteCount !== 1 ? 's' : ''}</span>}
             {notesPreview && <span className="truncate max-w-xs">{notesPreview}...</span>}
           </div>
@@ -321,7 +325,7 @@ function SourceEditor({
   const [addMode, setAddMode] = useState<'url' | 'paste'>('url');
 
   const updateField = <K extends keyof CourseSource>(field: K, value: CourseSource[K]) => {
-    setEditedSource({ ...editedSource, [field]: value });
+    setEditedSource((current) => ({ ...current, [field]: value }));
   };
 
   const addQuote = () => {
@@ -338,6 +342,19 @@ function SourceEditor({
 
   const removeQuote = (quoteId: string) => {
     updateField('keyQuotes', editedSource.keyQuotes.filter((q) => q.id !== quoteId));
+  };
+
+  const handleAttachmentUpload = (file?: File) => {
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      updateField('attachmentName', file.name);
+      updateField('attachmentMimeType', file.type);
+      updateField('attachmentDataUrl', reader.result as string);
+      updateField('uploadRequired', false);
+    };
+    reader.readAsDataURL(file);
   };
 
   const handleFetchMetadata = async (url: string) => {
@@ -525,6 +542,47 @@ function SourceEditor({
               <p className="font-mono text-xs text-ink-muted dark:text-dark-ink-muted mt-1">
                 Paste a URL and we'll try to auto-fill title, author, and type
               </p>
+            )}
+          </div>
+
+          <div className="md:col-span-2 p-4 border border-outline dark:border-dark-outline bg-surface-container dark:bg-dark-surface-container">
+            <div className="flex justify-between items-start gap-4 mb-3">
+              <div>
+                <label className="block font-mono text-xs uppercase tracking-wider text-ink-muted dark:text-dark-ink-muted mb-1">
+                  Source file or hard copy
+                </label>
+                <p className="text-sm text-ink-muted dark:text-dark-ink-muted">
+                  Attach a local PDF, image, or document when the syllabus lists a source without a usable link.
+                </p>
+              </div>
+              {editedSource.uploadRequired && !editedSource.attachmentName && (
+                <span className="font-mono text-xs px-2 py-1 border border-error text-error whitespace-nowrap">
+                  Upload needed
+                </span>
+              )}
+            </div>
+            <input
+              type="file"
+              accept=".pdf,.doc,.docx,.txt,.md,.png,.jpg,.jpeg"
+              onChange={(event) => handleAttachmentUpload(event.target.files?.[0])}
+              className="block w-full text-sm text-ink dark:text-dark-ink"
+            />
+            {editedSource.attachmentName && (
+              <div className="mt-3 flex items-center justify-between gap-3 font-mono text-xs">
+                <span className="text-ink dark:text-dark-ink">Attached: {editedSource.attachmentName}</span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    updateField('attachmentName', undefined);
+                    updateField('attachmentMimeType', undefined);
+                    updateField('attachmentDataUrl', undefined);
+                    updateField('uploadRequired', !editedSource.url);
+                  }}
+                  className="text-error hover:underline"
+                >
+                  Remove file
+                </button>
+              </div>
             )}
           </div>
         ) : (
