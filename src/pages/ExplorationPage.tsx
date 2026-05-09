@@ -1,18 +1,43 @@
-import { useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { v4 as uuidv4 } from 'uuid';
 import { getCoursePack } from '../course-packs';
 import { getFurtherExplorationAreas, saveFurtherExplorationArea, deleteFurtherExplorationArea } from '../utils/storage';
+import { useDebouncedAutosave, autosavePillText } from '../hooks/useDebouncedAutosave';
+import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts';
 import type { FurtherExplorationArea, Resource } from '../schemas/types';
 
 export default function ExplorationPage() {
   const { courseId } = useParams<{ courseId: string }>();
   const course = courseId ? getCoursePack(courseId) : null;
   
-  const [areas, setAreas] = useState<FurtherExplorationArea[]>(() => 
+  const [areas, setAreas] = useState<FurtherExplorationArea[]>(() =>
     courseId ? getFurtherExplorationAreas(courseId) : []
   );
   const [editingId, setEditingId] = useState<string | null>(null);
+
+  const editingArea = useMemo(
+    () => areas.find((a) => a.id === editingId) ?? null,
+    [areas, editingId],
+  );
+
+  const canSaveArea = useCallback(
+    (a: FurtherExplorationArea | null) => Boolean(a && a.title.trim()),
+    [],
+  );
+  const persistArea = useCallback((a: FurtherExplorationArea | null) => {
+    if (!a) return;
+    saveFurtherExplorationArea(a);
+  }, []);
+
+  const { status, lastSavedAt, errorMessage, flush } = useDebouncedAutosave({
+    value: editingArea,
+    canSave: canSaveArea,
+    save: persistArea,
+    enabled: Boolean(editingArea),
+  });
+
+  useKeyboardShortcuts({ save: () => void flush() });
 
   if (!course) {
     return (
@@ -44,11 +69,11 @@ export default function ExplorationPage() {
   };
 
   const updateArea = (areaId: string, updates: Partial<FurtherExplorationArea>) => {
-    setAreas(areas.map((a) => (a.id === areaId ? { ...a, ...updates } : a)));
+    setAreas((prev) => prev.map((a) => (a.id === areaId ? { ...a, ...updates } : a)));
   };
 
-  const saveArea = (area: FurtherExplorationArea) => {
-    saveFurtherExplorationArea(area);
+  const saveArea = () => {
+    void flush();
     setEditingId(null);
   };
 
@@ -56,6 +81,7 @@ export default function ExplorationPage() {
     if (!confirm('Are you sure you want to delete this exploration area?')) return;
     deleteFurtherExplorationArea(areaId);
     setAreas(areas.filter((a) => a.id !== areaId));
+    if (editingId === areaId) setEditingId(null);
   };
 
   const addResourceToArea = (areaId: string) => {
@@ -242,12 +268,12 @@ export default function ExplorationPage() {
                     </div>
 
                     {/* Actions */}
-                    <div className="flex gap-2 pt-4">
+                    <div className="flex flex-wrap gap-2 pt-4 items-center">
                       <button
-                        onClick={() => saveArea(area)}
+                        onClick={saveArea}
                         className="px-4 py-2 border-2 border-ink dark:border-dark-ink text-ink dark:text-dark-ink hover:bg-ink hover:text-inverse-on-surface dark:hover:bg-dark-ink dark:hover:text-dark-surface font-mono text-sm"
                       >
-                        Save
+                        Save & Close
                       </button>
                       <button
                         onClick={() => removeArea(area.id)}
@@ -255,6 +281,23 @@ export default function ExplorationPage() {
                       >
                         Delete
                       </button>
+                      {editingId === area.id && (
+                        <span
+                          role="status"
+                          aria-live="polite"
+                          className={`px-2 py-1 font-mono text-xs uppercase tracking-wider border ${
+                            status === 'error'
+                              ? 'border-error text-error'
+                              : status === 'saved'
+                              ? 'border-ink dark:border-dark-ink bg-ink text-inverse-on-surface dark:bg-dark-ink dark:text-dark-surface'
+                              : status === 'saving'
+                              ? 'border-ink dark:border-dark-ink text-ink dark:text-dark-ink animate-pulse'
+                              : 'border-outline dark:border-dark-outline text-ink-muted dark:text-dark-ink-muted'
+                          }`}
+                        >
+                          {autosavePillText(status, lastSavedAt, errorMessage)}
+                        </span>
+                      )}
                     </div>
                   </div>
                 ) : (

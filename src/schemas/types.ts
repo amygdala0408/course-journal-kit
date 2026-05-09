@@ -193,8 +193,12 @@ export type CourseSource = {
   required?: boolean;
   uploadRequired?: boolean;
   attachmentName?: string;
-  attachmentDataUrl?: string;
   attachmentMimeType?: string;
+  // IndexedDB key for the attachment blob. Replaces the legacy
+  // attachmentDataUrl which used to live inline in localStorage.
+  attachmentRef?: string;
+  // Legacy field kept for one-time migration. After migration this is undefined.
+  attachmentDataUrl?: string;
   usedInEntryIds?: string[];
   isAssigned: boolean;
   isSupplementary: boolean;
@@ -332,6 +336,10 @@ export type PublishedJournal = {
 // ============================================
 
 export type JournalData = {
+  // Bumped whenever the storage shape changes so we can migrate safely.
+  // 1 = pre-migration baseline (attachments inline as data URLs in localStorage).
+  // 2 = attachments moved to IndexedDB; CourseSource.attachmentRef points to a blob.
+  schemaVersion?: number;
   entries: JournalEntry[];
   furtherExplorationAreas: FurtherExplorationArea[];
   reviewCards: ReviewCard[];

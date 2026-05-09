@@ -1,8 +1,10 @@
-import { useState } from 'react';
+import { useCallback, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { v4 as uuidv4 } from 'uuid';
 import { getCoursePack } from '../course-packs';
 import { getEntries, getSyntheses, saveSynthesis } from '../utils/storage';
+import { useDebouncedAutosave, autosavePillText } from '../hooks/useDebouncedAutosave';
+import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts';
 import type { FinalSynthesis, SynthesisTheme } from '../schemas/types';
 
 export default function SynthesisPage() {
@@ -28,14 +30,27 @@ export default function SynthesisPage() {
     };
   });
 
-  const [saving, setSaving] = useState(false);
-
   // Always persist with the URL's courseId so renaming or re-routing doesn't
-  // strand a synthesis on a stale id. Keeps state derivation in render rather
-  // than firing a setState-in-effect cascade.
+  // strand a synthesis on a stale id.
   const effectiveSynthesis: FinalSynthesis = courseId && synthesis.courseId !== courseId
     ? { ...synthesis, courseId }
     : synthesis;
+
+  const canSave = useCallback(
+    (s: FinalSynthesis) => Boolean(s.courseId) && Boolean(s.title.trim()),
+    [],
+  );
+  const persist = useCallback((s: FinalSynthesis) => {
+    saveSynthesis(s);
+  }, []);
+
+  const { status, lastSavedAt, errorMessage, flush } = useDebouncedAutosave({
+    value: effectiveSynthesis,
+    canSave,
+    save: persist,
+  });
+
+  useKeyboardShortcuts({ save: () => void flush() });
 
   if (!course) {
     return (
@@ -47,10 +62,7 @@ export default function SynthesisPage() {
   }
 
   const handleSave = () => {
-    setSaving(true);
-    saveSynthesis(effectiveSynthesis);
-    setSynthesis(effectiveSynthesis);
-    setSaving(false);
+    void flush();
   };
 
   const toggleEntrySelection = (entryId: string) => {
@@ -96,15 +108,30 @@ export default function SynthesisPage() {
         </p>
       </header>
 
-      {/* Save Button */}
-      <div className="mb-8">
+      {/* Save Button + autosave status */}
+      <div className="mb-8 flex flex-wrap items-center gap-3">
         <button
           onClick={handleSave}
-          disabled={saving}
+          disabled={status === 'saving'}
           className="px-6 py-3 border-2 border-ink dark:border-dark-ink text-ink dark:text-dark-ink hover:bg-ink hover:text-inverse-on-surface dark:hover:bg-dark-ink dark:hover:text-dark-surface font-mono text-sm uppercase tracking-wider disabled:opacity-50"
         >
-          {saving ? 'Saving...' : 'Save Synthesis'}
+          Save Now
         </button>
+        <span
+          role="status"
+          aria-live="polite"
+          className={`px-2 py-1 font-mono text-xs uppercase tracking-wider border ${
+            status === 'error'
+              ? 'border-error text-error'
+              : status === 'saved'
+              ? 'border-ink dark:border-dark-ink bg-ink text-inverse-on-surface dark:bg-dark-ink dark:text-dark-surface'
+              : status === 'saving'
+              ? 'border-ink dark:border-dark-ink text-ink dark:text-dark-ink animate-pulse'
+              : 'border-outline dark:border-dark-outline text-ink-muted dark:text-dark-ink-muted'
+          }`}
+        >
+          {autosavePillText(status, lastSavedAt, errorMessage)}
+        </span>
       </div>
 
       <div className="grid grid-cols-3 gap-8">

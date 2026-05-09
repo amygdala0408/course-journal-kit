@@ -11,11 +11,89 @@ import type {
   PublishedJournal,
   CourseSource,
 } from '../schemas/types';
+import {
+  blobToDataUrl,
+  dataUrlToBlob,
+  getAttachment,
+  isAttachmentsAvailable,
+  putAttachment,
+} from './attachments';
 
 const STORAGE_KEYS = {
   JOURNAL_DATA: 'course-journal-kit-data',
+  JOURNAL_BACKUP: 'course-journal-kit-data:backup',
+  JOURNAL_BACKUP_PREV: 'course-journal-kit-data:backup-prev',
+  LAST_BACKUP_AT: 'course-journal-kit-data:last-backup-at',
   SETTINGS: 'course-journal-kit-settings',
 } as const;
+
+// Bump whenever JournalData shape changes in a way migration must handle.
+export const CURRENT_SCHEMA_VERSION = 2;
+
+// ============================================
+// TYPED STORAGE ERROR + EVENT BUS
+// ============================================
+
+export type StorageErrorKind =
+  | 'quota'
+  | 'unavailable'
+  | 'parse'
+  | 'serialize'
+  | 'unknown';
+
+export class StorageError extends Error {
+  kind: StorageErrorKind;
+  cause?: unknown;
+  constructor(kind: StorageErrorKind, message: string, cause?: unknown) {
+    super(message);
+    this.name = 'StorageError';
+    this.kind = kind;
+    this.cause = cause;
+  }
+}
+
+type StorageEvent =
+  | { type: 'saved'; at: Date }
+  | { type: 'error'; error: StorageError };
+
+type Listener = (event: StorageEvent) => void;
+const listeners = new Set<Listener>();
+
+export function subscribeStorage(listener: Listener): () => void {
+  listeners.add(listener);
+  return () => listeners.delete(listener);
+}
+
+function emit(event: StorageEvent) {
+  listeners.forEach((l) => {
+    try {
+      l(event);
+    } catch (err) {
+      console.error('Storage listener threw:', err);
+    }
+  });
+}
+
+function classifyError(err: unknown): StorageError {
+  if (err instanceof StorageError) return err;
+  if (err instanceof DOMException) {
+    if (
+      err.name === 'QuotaExceededError' ||
+      err.name === 'NS_ERROR_DOM_QUOTA_REACHED' ||
+      err.code === 22
+    ) {
+      return new StorageError(
+        'quota',
+        'Local storage is full. Remove an attached file or export a backup, then try again.',
+        err,
+      );
+    }
+  }
+  if (err instanceof Error) {
+    return new StorageError('unknown', err.message, err);
+  }
+  return new StorageError('unknown', 'Unknown storage error.', err);
+}
 
 // ============================================
 // DEFAULT DATA
@@ -29,6 +107,7 @@ const defaultSettings: UserSettings = {
 };
 
 const defaultJournalData: JournalData = {
+  schemaVersion: CURRENT_SCHEMA_VERSION,
   entries: [],
   furtherExplorationAreas: [],
   reviewCards: [],
@@ -51,36 +130,220 @@ function createId(prefix: string): string {
 // LOAD / SAVE
 // ============================================
 
-export function loadJournalData(): JournalData {
+function normalizeShape(parsed: Partial<JournalData> | null | undefined): JournalData {
+  const safe = parsed ?? {};
+  return {
+    schemaVersion: safe.schemaVersion ?? 1,
+    entries: safe.entries || [],
+    furtherExplorationAreas: safe.furtherExplorationAreas || [],
+    reviewCards: safe.reviewCards || [],
+    syntheses: safe.syntheses || [],
+    sources: safe.sources || [],
+    customCoursePacks: safe.customCoursePacks || [],
+    settings: { ...defaultSettings, ...(safe.settings ?? {}) },
+  };
+}
+
+function tryParseFromKey(key: string): JournalData | null {
+  if (typeof localStorage === 'undefined') return null;
+  const raw = localStorage.getItem(key);
+  if (!raw) return null;
   try {
-    if (typeof localStorage === 'undefined') return defaultJournalData;
-    const stored = localStorage.getItem(STORAGE_KEYS.JOURNAL_DATA);
-    if (!stored) return defaultJournalData;
-    
-    const parsed = JSON.parse(stored) as JournalData;
-    return {
-      ...defaultJournalData,
-      ...parsed,
-      entries: parsed.entries || [],
-      furtherExplorationAreas: parsed.furtherExplorationAreas || [],
-      reviewCards: parsed.reviewCards || [],
-      syntheses: parsed.syntheses || [],
-      sources: parsed.sources || [],
-      customCoursePacks: parsed.customCoursePacks || [],
-      settings: { ...defaultSettings, ...parsed.settings },
-    };
-  } catch (error) {
-    console.error('Failed to load journal data:', error);
-    return defaultJournalData;
+    return normalizeShape(JSON.parse(raw) as Partial<JournalData>);
+  } catch {
+    return null;
+  }
+}
+
+export function loadJournalData(): JournalData {
+  if (typeof localStorage === 'undefined') return defaultJournalData;
+
+  const live = tryParseFromKey(STORAGE_KEYS.JOURNAL_DATA);
+  if (live) return live;
+
+  // The live blob was missing or unparseable. Try the rolling backups in
+  // order so we can self-heal from a corrupted single write.
+  const backup = tryParseFromKey(STORAGE_KEYS.JOURNAL_BACKUP);
+  if (backup) {
+    emit({
+      type: 'error',
+      error: new StorageError(
+        'parse',
+        'Live data was unreadable; recovered from the most recent backup.',
+      ),
+    });
+    return backup;
+  }
+
+  const prev = tryParseFromKey(STORAGE_KEYS.JOURNAL_BACKUP_PREV);
+  if (prev) {
+    emit({
+      type: 'error',
+      error: new StorageError(
+        'parse',
+        'Live data and primary backup were unreadable; recovered from the previous backup.',
+      ),
+    });
+    return prev;
+  }
+
+  return defaultJournalData;
+}
+
+// Backup rotation: every Nth save promotes the current snapshot to :backup
+// and the old :backup to :backup-prev. We also rotate at most every 60s so a
+// burst of edits doesn't churn the backups.
+const BACKUP_MIN_INTERVAL_MS = 60_000;
+
+function maybeRotateBackup(serialized: string) {
+  if (typeof localStorage === 'undefined') return;
+  const lastAtRaw = localStorage.getItem(STORAGE_KEYS.LAST_BACKUP_AT);
+  const lastAt = lastAtRaw ? Date.parse(lastAtRaw) : 0;
+  if (Number.isFinite(lastAt) && Date.now() - lastAt < BACKUP_MIN_INTERVAL_MS) {
+    return;
+  }
+  try {
+    const currentBackup = localStorage.getItem(STORAGE_KEYS.JOURNAL_BACKUP);
+    if (currentBackup) {
+      localStorage.setItem(STORAGE_KEYS.JOURNAL_BACKUP_PREV, currentBackup);
+    }
+    localStorage.setItem(STORAGE_KEYS.JOURNAL_BACKUP, serialized);
+    localStorage.setItem(STORAGE_KEYS.LAST_BACKUP_AT, new Date().toISOString());
+  } catch (err) {
+    // Backup rotation is best-effort. If the quota is full we'd rather drop
+    // the backup than block the live write; the live write itself runs
+    // independently below.
+    console.warn('Backup rotation failed (non-fatal):', err);
   }
 }
 
 export function saveJournalData(data: JournalData): void {
+  if (typeof localStorage === 'undefined') {
+    const error = new StorageError('unavailable', 'localStorage is not available.');
+    emit({ type: 'error', error });
+    throw error;
+  }
+
+  let serialized: string;
   try {
-    if (typeof localStorage === 'undefined') return;
-    localStorage.setItem(STORAGE_KEYS.JOURNAL_DATA, JSON.stringify(data));
-  } catch (error) {
-    console.error('Failed to save journal data:', error);
+    serialized = JSON.stringify({
+      ...data,
+      schemaVersion: data.schemaVersion ?? CURRENT_SCHEMA_VERSION,
+    });
+  } catch (err) {
+    const error = new StorageError(
+      'serialize',
+      'Could not serialize journal data.',
+      err,
+    );
+    emit({ type: 'error', error });
+    throw error;
+  }
+
+  try {
+    localStorage.setItem(STORAGE_KEYS.JOURNAL_DATA, serialized);
+  } catch (err) {
+    const error = classifyError(err);
+    emit({ type: 'error', error });
+    throw error;
+  }
+
+  maybeRotateBackup(serialized);
+  emit({ type: 'saved', at: new Date() });
+}
+
+export function getLastBackupAt(): Date | null {
+  if (typeof localStorage === 'undefined') return null;
+  const raw = localStorage.getItem(STORAGE_KEYS.LAST_BACKUP_AT);
+  if (!raw) return null;
+  const ms = Date.parse(raw);
+  return Number.isFinite(ms) ? new Date(ms) : null;
+}
+
+export function getStorageDiagnostics(): {
+  liveBytes: number;
+  backupBytes: number;
+  prevBackupBytes: number;
+  lastBackupAt: Date | null;
+  schemaVersion: number;
+} {
+  if (typeof localStorage === 'undefined') {
+    return {
+      liveBytes: 0,
+      backupBytes: 0,
+      prevBackupBytes: 0,
+      lastBackupAt: null,
+      schemaVersion: CURRENT_SCHEMA_VERSION,
+    };
+  }
+  const sizeOf = (key: string) => (localStorage.getItem(key) || '').length;
+  const data = loadJournalData();
+  return {
+    liveBytes: sizeOf(STORAGE_KEYS.JOURNAL_DATA),
+    backupBytes: sizeOf(STORAGE_KEYS.JOURNAL_BACKUP),
+    prevBackupBytes: sizeOf(STORAGE_KEYS.JOURNAL_BACKUP_PREV),
+    lastBackupAt: getLastBackupAt(),
+    schemaVersion: data.schemaVersion ?? 1,
+  };
+}
+
+// ============================================
+// MIGRATIONS
+// ============================================
+
+let migrationInFlight: Promise<void> | null = null;
+
+export function runMigrations(): Promise<void> {
+  if (migrationInFlight) return migrationInFlight;
+  migrationInFlight = (async () => {
+    try {
+      if (typeof localStorage === 'undefined') return;
+      const data = loadJournalData();
+      const current = data.schemaVersion ?? 1;
+      if (current >= CURRENT_SCHEMA_VERSION) return;
+
+      if (current < 2) {
+        await migrateAttachmentsToIndexedDb(data);
+      }
+
+      data.schemaVersion = CURRENT_SCHEMA_VERSION;
+      try {
+        saveJournalData(data);
+      } catch (err) {
+        console.error('Migration save failed:', err);
+      }
+    } finally {
+      migrationInFlight = null;
+    }
+  })();
+  return migrationInFlight;
+}
+
+async function migrateAttachmentsToIndexedDb(data: JournalData): Promise<void> {
+  if (!isAttachmentsAvailable()) return;
+  if (!data.sources || data.sources.length === 0) return;
+
+  for (const source of data.sources) {
+    const inlineUrl = source.attachmentDataUrl;
+    if (!inlineUrl) continue;
+    if (source.attachmentRef) {
+      // Already migrated; just clear the legacy field.
+      delete source.attachmentDataUrl;
+      continue;
+    }
+    try {
+      const blob = dataUrlToBlob(inlineUrl);
+      const id = await putAttachment({
+        name: source.attachmentName ?? 'attachment',
+        mimeType: source.attachmentMimeType ?? blob.type ?? 'application/octet-stream',
+        data: blob,
+      });
+      source.attachmentRef = id;
+      delete source.attachmentDataUrl;
+    } catch (err) {
+      console.warn('Failed to migrate attachment for source', source.id, err);
+      // Leave the inline copy in place so the user doesn't lose the file.
+    }
   }
 }
 
@@ -321,9 +584,40 @@ export function saveSettings(settings: Partial<UserSettings>): void {
 // EXPORT / IMPORT
 // ============================================
 
+// Sync export. Returns the journal JSON without attachment binaries inlined;
+// IndexedDB blobs are referenced by `attachmentRef` only. Use this for quick
+// exports where size matters or the destination has its own attachment store.
 export function exportJournalData(): string {
   const data = loadJournalData();
   return JSON.stringify(data, null, 2);
+}
+
+// Full export. Inlines IndexedDB attachment blobs back into the JSON as
+// `attachmentDataUrl`, so the resulting file is self-contained and can be
+// re-imported on a different browser/device. The legacy `attachmentRef` is
+// preserved so a re-import on the same device skips re-storing.
+export async function exportJournalDataWithAttachments(): Promise<string> {
+  const data = loadJournalData();
+  const sources = await Promise.all(
+    (data.sources || []).map(async (source) => {
+      if (!source.attachmentRef) return source;
+      try {
+        const blob = await getAttachment(source.attachmentRef);
+        if (!blob) return source;
+        const dataUrl = await blobToDataUrl(blob.data);
+        return {
+          ...source,
+          attachmentDataUrl: dataUrl,
+          attachmentMimeType: source.attachmentMimeType ?? blob.mimeType,
+          attachmentName: source.attachmentName ?? blob.name,
+        };
+      } catch (err) {
+        console.warn('Failed to inline attachment for export:', source.id, err);
+        return source;
+      }
+    })
+  );
+  return JSON.stringify({ ...data, sources }, null, 2);
 }
 
 export type ImportMode = 'merge' | 'replace';
@@ -419,11 +713,14 @@ export function importJournalData(jsonString: string, mode: ImportMode = 'merge'
   }
 
   if (mode === 'replace') {
-    saveJournalData({
+    const replaced: JournalData = {
       ...defaultJournalData,
       ...parsed,
+      schemaVersion: 1, // force the migration runner to relocate attachments
       settings: { ...defaultSettings, ...(parsed.settings ?? {}) },
-    } as JournalData);
+    } as JournalData;
+    saveJournalData(replaced);
+    void runMigrations(); // heal any inline attachments in the imported data
 
     result.success = true;
     result.added = {
@@ -563,9 +860,50 @@ export function getDefaultTagsForNewEntry(options: {
 // CLEAR DATA
 // ============================================
 
-export function clearAllData(): void {
+export function clearAllData(options: { keepBackups?: boolean } = {}): void {
   if (typeof localStorage === 'undefined') return;
   localStorage.removeItem(STORAGE_KEYS.JOURNAL_DATA);
+  if (!options.keepBackups) {
+    localStorage.removeItem(STORAGE_KEYS.JOURNAL_BACKUP);
+    localStorage.removeItem(STORAGE_KEYS.JOURNAL_BACKUP_PREV);
+    localStorage.removeItem(STORAGE_KEYS.LAST_BACKUP_AT);
+  }
+}
+
+// Triggers a browser download of the current journal as a timestamped JSON
+// file with attachment binaries inlined. Use this for true offline backups.
+export async function downloadBackupFile(): Promise<{ filename: string }> {
+  const json = await exportJournalDataWithAttachments();
+  const stamp = new Date()
+    .toISOString()
+    .replace(/[:]/g, '-')
+    .replace(/\.\d+Z$/, 'Z');
+  const filename = `course-journal-kit-backup-${stamp}.json`;
+
+  const blob = new Blob([json], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+
+  try {
+    sessionStorage.setItem('course-journal-kit:backup-downloaded-at', new Date().toISOString());
+  } catch {
+    // sessionStorage can be unavailable in private modes; non-fatal.
+  }
+  return { filename };
+}
+
+export function hasDownloadedBackupThisSession(): boolean {
+  try {
+    return Boolean(sessionStorage.getItem('course-journal-kit:backup-downloaded-at'));
+  } catch {
+    return false;
+  }
 }
 
 export function clearCourseData(courseId: string): void {

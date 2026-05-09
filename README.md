@@ -89,6 +89,27 @@ exploration areas.
 - **Replace** — wipes local data and uses the file as the new source of truth.
   Always confirms first.
 
+## Where your data lives (and how to recover it)
+
+All drafts live in your browser's `localStorage` under the key
+`course-journal-kit-data`. Source attachments (PDFs, images) live in IndexedDB
+under the database `course-journal-kit` (store: `attachments`).
+
+If something looks wrong:
+
+1. Open the app in your browser.
+2. DevTools (Option-Cmd-I on macOS) → Application tab → Storage.
+3. `localStorage` → your site → `course-journal-kit-data` is the full JSON
+   blob. `course-journal-kit-data:backup` and `:backup-prev` are rolling
+   safety copies the app writes automatically.
+4. To recover from a corrupted live blob, copy the contents of `:backup` over
+   `course-journal-kit-data` and reload the page.
+5. To recover from a wiped browser, use `Export / Share → Import` with the
+   most recent JSON backup you downloaded.
+
+The `Settings → Data Backup` panel has a one-click "Download backup" button.
+Use it any time you've done a lot of work and want a copy on disk.
+
 ## Local development
 
 ```bash

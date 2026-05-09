@@ -6,10 +6,12 @@ import {
   getFurtherExplorationAreas,
   getSyntheses,
   getSettings,
-  exportJournalData,
+  exportJournalDataWithAttachments,
   importJournalData,
   exportPublishedJournal,
 } from '../utils/storage';
+import { isSyncConfigured } from '../utils/supabaseClient';
+import { publishShareSnapshot } from '../utils/sync';
 import type { ImportMode, ImportResult } from '../utils/storage';
 import { journalToMarkdown, downloadMarkdown, downloadJSON, printToPDF } from '../utils/export';
 
@@ -26,6 +28,12 @@ export default function ExportPage() {
   const [importResult, setImportResult] = useState<ImportResult | null>(null);
   const [shareUrl, setShareUrl] = useState('');
   const [copyStatus, setCopyStatus] = useState<'idle' | 'copied'>('idle');
+  const [snapshotState, setSnapshotState] = useState<
+    | { kind: 'idle' }
+    | { kind: 'publishing' }
+    | { kind: 'done'; url: string }
+    | { kind: 'error'; message: string }
+  >({ kind: 'idle' });
 
   if (!course) {
     return (
@@ -39,8 +47,8 @@ export default function ExportPage() {
   const publishedEntries = entries.filter((e) => e.published);
   const synthesis = syntheses[0];
 
-  const handleExportJSON = () => {
-    const data = exportJournalData();
+  const handleExportJSON = async () => {
+    const data = await exportJournalDataWithAttachments();
     downloadJSON(JSON.parse(data), `course-journal-kit-backup-${new Date().toISOString().split('T')[0]}`);
   };
 
@@ -87,6 +95,25 @@ export default function ExportPage() {
       setTimeout(() => setCopyStatus('idle'), 2000);
     } catch (error) {
       console.error('Could not copy share link:', error);
+    }
+  };
+
+  const handlePublishSnapshot = async () => {
+    setSnapshotState({ kind: 'publishing' });
+    try {
+      const snapshot = exportPublishedJournal(course.id, settings.studentName);
+      const { url } = await publishShareSnapshot(snapshot);
+      try {
+        await navigator.clipboard.writeText(url);
+      } catch {
+        // copying is best-effort
+      }
+      setSnapshotState({ kind: 'done', url });
+    } catch (err) {
+      setSnapshotState({
+        kind: 'error',
+        message: err instanceof Error ? err.message : 'Could not publish snapshot.',
+      });
     }
   };
 
@@ -160,7 +187,30 @@ export default function ExportPage() {
           >
             Preview Public View →
           </Link>
+          {isSyncConfigured() && (
+            <button
+              onClick={() => void handlePublishSnapshot()}
+              disabled={snapshotState.kind === 'publishing'}
+              className="px-4 py-2 border-2 border-ink dark:border-dark-ink text-ink dark:text-dark-ink hover:bg-ink hover:text-inverse-on-surface dark:hover:bg-dark-ink dark:hover:text-dark-surface font-mono text-sm disabled:opacity-50"
+              title="Push a snapshot of your published entries to Supabase and get a /share/:id URL that works on any device."
+            >
+              {snapshotState.kind === 'publishing' ? 'Publishing…' : 'Publish snapshot'}
+            </button>
+          )}
         </div>
+        {snapshotState.kind === 'done' && (
+          <div className="mt-3 p-3 bg-surface-container dark:bg-dark-surface-container">
+            <p className="font-mono text-xs text-ink dark:text-dark-ink break-all">
+              ✓ Cross-device share URL (copied):{' '}
+              <a href={snapshotState.url} className="underline">
+                {snapshotState.url}
+              </a>
+            </p>
+          </div>
+        )}
+        {snapshotState.kind === 'error' && (
+          <p className="mt-3 font-mono text-xs text-error">{snapshotState.message}</p>
+        )}
         {shareUrl && (
           <div className="mt-4 p-3 bg-surface-container dark:bg-dark-surface-container">
             <p className="font-mono text-sm text-ink dark:text-dark-ink break-all">{shareUrl}</p>
@@ -185,7 +235,7 @@ export default function ExportPage() {
               <p className="text-sm text-ink-muted dark:text-dark-ink-muted">All entries, settings, and data</p>
             </div>
             <button
-              onClick={handleExportJSON}
+              onClick={() => void handleExportJSON()}
               className="px-4 py-2 border border-ink dark:border-dark-ink text-ink dark:text-dark-ink hover:bg-surface-container-high dark:hover:bg-dark-surface-container font-mono text-sm"
             >
               Download

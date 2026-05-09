@@ -1,21 +1,65 @@
+import { useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { getCoursePack, getCoursePacks } from '../course-packs';
 import { getEntries, getFurtherExplorationAreas, getSyntheses, getSettings } from '../utils/storage';
+import { fetchShareSnapshot } from '../utils/sync';
+import type { PublishedJournal } from '../schemas/types';
 
 export default function PublicPage() {
   const { courseId, shareId } = useParams<{ courseId?: string; shareId?: string }>();
-  // The /share/:shareId route is reserved for future signed-share links. For now,
-  // we treat the share id as a courseId so existing links keep working and any
-  // future hashing/decoding can hook in here.
+  // /share/:shareId pulls a published snapshot from Supabase (when configured)
+  // so the URL works on any device. /public/:courseId reads local data.
   const resolvedCourseId = courseId || shareId;
-  const course = resolvedCourseId
+  const [cloudSnapshot, setCloudSnapshot] = useState<PublishedJournal | null>(null);
+  const [snapshotLoading, setSnapshotLoading] = useState(Boolean(shareId));
+
+  useEffect(() => {
+    if (!shareId) return;
+    let cancelled = false;
+    fetchShareSnapshot(shareId)
+      .then((snap) => {
+        if (cancelled) return;
+        setCloudSnapshot(snap);
+      })
+      .finally(() => {
+        if (!cancelled) setSnapshotLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [shareId]);
+
+  const courseFromLocal = resolvedCourseId
     ? getCoursePack(resolvedCourseId) || getCoursePacks().find((c) => c.id === resolvedCourseId)
     : null;
-  const allEntries = course ? getEntries(course.id) : [];
-  const entries = allEntries.filter((e) => e.published);
-  const explorationAreas = course ? getFurtherExplorationAreas(course.id) : [];
-  const syntheses = course ? getSyntheses(course.id) : [];
+  const course = cloudSnapshot
+    ? getCoursePack(cloudSnapshot.courseId) ||
+      getCoursePacks().find((c) => c.id === cloudSnapshot.courseId) ||
+      courseFromLocal
+    : courseFromLocal;
+
+  const localEntries = course ? getEntries(course.id) : [];
+  const entries = cloudSnapshot
+    ? cloudSnapshot.entries
+    : localEntries.filter((e) => e.published);
+  const explorationAreas = cloudSnapshot
+    ? cloudSnapshot.furtherExplorationAreas
+    : course
+    ? getFurtherExplorationAreas(course.id)
+    : [];
+  const localSyntheses = course ? getSyntheses(course.id) : [];
+  const syntheses = cloudSnapshot && cloudSnapshot.finalSynthesis
+    ? [cloudSnapshot.finalSynthesis]
+    : localSyntheses;
   const settings = getSettings();
+
+  if (snapshotLoading) {
+    return (
+      <div className="min-h-screen bg-surface flex items-center justify-center p-8">
+        <p className="font-mono text-sm text-ink-muted">Loading shared journal…</p>
+      </div>
+    );
+  }
 
   if (!course) {
     return (

@@ -1,11 +1,26 @@
-import { useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { v4 as uuidv4 } from 'uuid';
 import { getCoursePack } from '../course-packs';
-import { getSources, saveSource, deleteSource } from '../utils/storage';
+import {
+  getSources,
+  saveSource,
+  deleteSource,
+  getSettings,
+  StorageError,
+} from '../utils/storage';
+import {
+  deleteAttachment,
+  getAttachmentObjectUrl,
+  isAttachmentsAvailable,
+  putAttachment,
+} from '../utils/attachments';
 import { buildCitationFromInputs, suggestCitationTemplate } from '../utils/citations';
 import { fetchUrlMetadata } from '../utils/metadata';
+import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts';
 import type { CourseSource, SourceQuote, ResourceType } from '../schemas/types';
+
+type AutosaveStatus = 'idle' | 'pending' | 'saving' | 'saved' | 'error';
 
 type ViewMode = 'list' | 'detail' | 'add' | 'search';
 
@@ -225,6 +240,9 @@ export default function SourcesPage() {
           onSave={handleSaveSource}
           onDelete={handleDeleteSource}
           onCancel={() => {
+            // Re-read storage so any autosaved edits show up in the list
+            // immediately, without having to reload the page.
+            refreshSources();
             setSelectedSource(null);
             setViewMode('list');
           }}
@@ -324,7 +342,141 @@ function SourceEditor({
   const [isFetchingMetadata, setIsFetchingMetadata] = useState(false);
   const [addMode, setAddMode] = useState<'url' | 'paste'>('url');
 
+  // Autosave state. New sources don't autosave until the title is set, since
+  // the row's identity is the title for now and the user might still be
+  // pasting metadata. Existing sources autosave aggressively.
+  const [autosaveStatus, setAutosaveStatus] = useState<AutosaveStatus>(isNew ? 'idle' : 'saved');
+  const [lastSavedAt, setLastSavedAt] = useState<Date | null>(isNew ? null : new Date(source.updatedAt));
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [attachmentPreviewUrl, setAttachmentPreviewUrl] = useState<string | null>(null);
+
+  const dirtyRef = useRef(false);
+  const editedRef = useRef<CourseSource>(source);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isMountedRef = useRef(true);
+
+  const autosaveDelayMs = useMemo(() => {
+    const fromSettings = getSettings().autoSaveInterval;
+    return Math.max(800, Math.min(fromSettings || 2000, 60000));
+  }, []);
+
+  useEffect(() => {
+    editedRef.current = editedSource;
+  }, [editedSource]);
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
+
+  // Resolve a preview URL for attachments living in IndexedDB. We use a
+  // setState-in-effect for the legacy data-URL fallback because the source
+  // value is async-loaded and we must reflect it after fetch resolves.
+  /* eslint-disable react-hooks/set-state-in-effect */
+  useEffect(() => {
+    let cancelled = false;
+    let revokeUrl: string | null = null;
+
+    if (editedSource.attachmentRef) {
+      getAttachmentObjectUrl(editedSource.attachmentRef)
+        .then((url) => {
+          if (cancelled) {
+            if (url) URL.revokeObjectURL(url);
+            return;
+          }
+          if (url) {
+            revokeUrl = url;
+            setAttachmentPreviewUrl(url);
+          }
+        })
+        .catch(() => {
+          // non-fatal; the editor can still display the file name
+        });
+    } else if (editedSource.attachmentDataUrl) {
+      setAttachmentPreviewUrl(editedSource.attachmentDataUrl);
+    } else {
+      setAttachmentPreviewUrl(null);
+    }
+
+    return () => {
+      cancelled = true;
+      if (revokeUrl) URL.revokeObjectURL(revokeUrl);
+    };
+  }, [editedSource.attachmentRef, editedSource.attachmentDataUrl]);
+  /* eslint-enable react-hooks/set-state-in-effect */
+
+  const flushSave = useCallback(() => {
+    if (timerRef.current) {
+      clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
+    const current = editedRef.current;
+    if (!current.title.trim()) {
+      // Don't autosave a placeholder row; the user is still typing the title.
+      return;
+    }
+    setAutosaveStatus('saving');
+    setErrorMessage(null);
+    try {
+      saveSource(current);
+      dirtyRef.current = false;
+      if (!isMountedRef.current) return;
+      setLastSavedAt(new Date());
+      setAutosaveStatus('saved');
+    } catch (err) {
+      if (!isMountedRef.current) return;
+      setAutosaveStatus('error');
+      if (err instanceof StorageError) {
+        setErrorMessage(err.message);
+      } else if (err instanceof Error) {
+        setErrorMessage(err.message);
+      } else {
+        setErrorMessage('Save failed for an unknown reason.');
+      }
+    }
+  }, []);
+
+  // Schedule a debounced autosave whenever editedSource is dirty. The
+  // setState-in-effect calls below are intentional: this effect implements
+  // the canonical debounced-save lifecycle (mirrors EntryPage) and the rule
+  // is too strict for that pattern.
+  /* eslint-disable react-hooks/set-state-in-effect */
+  useEffect(() => {
+    if (!dirtyRef.current) return;
+    if (!editedSource.title.trim()) {
+      setAutosaveStatus('idle');
+      return;
+    }
+    if (timerRef.current) clearTimeout(timerRef.current);
+    setAutosaveStatus('pending');
+    timerRef.current = setTimeout(flushSave, autosaveDelayMs);
+    return () => {
+      if (timerRef.current) {
+        clearTimeout(timerRef.current);
+        timerRef.current = null;
+      }
+    };
+  }, [editedSource, autosaveDelayMs, flushSave]);
+  /* eslint-enable react-hooks/set-state-in-effect */
+
+  // Flush on unmount and on tab close.
+  useEffect(() => {
+    const handler = () => {
+      if (dirtyRef.current) flushSave();
+    };
+    window.addEventListener('beforeunload', handler);
+    return () => {
+      window.removeEventListener('beforeunload', handler);
+      if (dirtyRef.current) flushSave();
+    };
+  }, [flushSave]);
+
+  useKeyboardShortcuts({ save: flushSave });
+
   const updateField = <K extends keyof CourseSource>(field: K, value: CourseSource[K]) => {
+    dirtyRef.current = true;
     setEditedSource((current) => ({ ...current, [field]: value }));
   };
 
@@ -344,17 +496,71 @@ function SourceEditor({
     updateField('keyQuotes', editedSource.keyQuotes.filter((q) => q.id !== quoteId));
   };
 
-  const handleAttachmentUpload = (file?: File) => {
+  const handleAttachmentUpload = async (file?: File) => {
     if (!file) return;
+    if (!isAttachmentsAvailable()) {
+      setAutosaveStatus('error');
+      setErrorMessage('Attachments require IndexedDB, which is not available in this browser.');
+      return;
+    }
 
-    const reader = new FileReader();
-    reader.onload = () => {
-      updateField('attachmentName', file.name);
-      updateField('attachmentMimeType', file.type);
-      updateField('attachmentDataUrl', reader.result as string);
-      updateField('uploadRequired', false);
-    };
-    reader.readAsDataURL(file);
+    try {
+      // Replace any prior attachment so we don't leak orphan blobs.
+      if (editedSource.attachmentRef) {
+        try {
+          await deleteAttachment(editedSource.attachmentRef);
+        } catch {
+          // best-effort
+        }
+      }
+      const id = await putAttachment({
+        name: file.name,
+        mimeType: file.type || 'application/octet-stream',
+        data: file,
+      });
+      dirtyRef.current = true;
+      setEditedSource((current) => ({
+        ...current,
+        attachmentRef: id,
+        attachmentName: file.name,
+        attachmentMimeType: file.type || current.attachmentMimeType,
+        attachmentDataUrl: undefined,
+        uploadRequired: false,
+      }));
+    } catch (err) {
+      setAutosaveStatus('error');
+      setErrorMessage(
+        err instanceof Error
+          ? `Could not save attachment: ${err.message}`
+          : 'Could not save attachment.',
+      );
+    }
+  };
+
+  const handleAttachmentRemove = async () => {
+    if (editedSource.attachmentRef) {
+      try {
+        await deleteAttachment(editedSource.attachmentRef);
+      } catch {
+        // best-effort
+      }
+    }
+    dirtyRef.current = true;
+    setEditedSource((current) => ({
+      ...current,
+      attachmentRef: undefined,
+      attachmentName: undefined,
+      attachmentMimeType: undefined,
+      attachmentDataUrl: undefined,
+      uploadRequired: !current.url,
+    }));
+  };
+
+  const handleCancel = () => {
+    if (dirtyRef.current && !isNew) {
+      flushSave();
+    }
+    onCancel();
   };
 
   const handleFetchMetadata = async (url: string) => {
@@ -390,19 +596,59 @@ function SourceEditor({
 
   const resourceTypes: ResourceType[] = ['article', 'book', 'video', 'podcast', 'website', 'document', 'other'];
 
+  const statusPillText = (() => {
+    switch (autosaveStatus) {
+      case 'idle':
+        return isNew ? 'Add a title to start autosave' : 'Autosave armed';
+      case 'pending':
+        return 'Unsaved changes…';
+      case 'saving':
+        return 'Saving…';
+      case 'saved':
+        return lastSavedAt ? `Saved ${lastSavedAt.toLocaleTimeString()}` : 'Saved';
+      case 'error':
+        return errorMessage || 'Save failed — try Save Now';
+    }
+  })();
+
+  const statusPillClass = (() => {
+    switch (autosaveStatus) {
+      case 'pending':
+        return 'border-ink dark:border-dark-ink text-ink dark:text-dark-ink';
+      case 'saving':
+        return 'border-ink dark:border-dark-ink text-ink dark:text-dark-ink animate-pulse';
+      case 'saved':
+        return 'border-ink dark:border-dark-ink bg-ink text-inverse-on-surface dark:bg-dark-ink dark:text-dark-surface';
+      case 'error':
+        return 'border-error text-error';
+      default:
+        return 'border-outline dark:border-dark-outline text-ink-muted dark:text-dark-ink-muted';
+    }
+  })();
+
   return (
     <div className="border-2 border-ink dark:border-dark-ink">
       {/* Header */}
-      <div className="p-4 border-b border-ink dark:border-dark-ink flex justify-between items-center">
+      <div className="p-4 border-b border-ink dark:border-dark-ink flex flex-wrap gap-3 justify-between items-center">
         <h2 className="font-editorial text-xl font-medium text-ink dark:text-dark-ink">
           {isNew ? 'Add New Source' : 'Edit Source'}
         </h2>
-        <button
-          onClick={onCancel}
-          className="text-ink-muted dark:text-dark-ink-muted hover:text-ink dark:hover:text-dark-ink"
-        >
-          ✕ Close
-        </button>
+        <div className="flex items-center gap-3">
+          <span
+            role="status"
+            aria-live="polite"
+            className={`px-2 py-1 font-mono text-xs uppercase tracking-wider border ${statusPillClass}`}
+          >
+            {statusPillText}
+          </span>
+          <button
+            onClick={handleCancel}
+            className="text-ink-muted dark:text-dark-ink-muted hover:text-ink dark:hover:text-dark-ink"
+            aria-label="Close source editor"
+          >
+            ✕ Close
+          </button>
+        </div>
       </div>
 
       {/* Add Mode Toggle (only for new sources) */}
@@ -564,20 +810,32 @@ function SourceEditor({
               <input
                 type="file"
                 accept=".pdf,.doc,.docx,.txt,.md,.png,.jpg,.jpeg"
-                onChange={(event) => handleAttachmentUpload(event.target.files?.[0])}
+                onChange={(event) => void handleAttachmentUpload(event.target.files?.[0])}
                 className="block w-full text-sm text-ink dark:text-dark-ink"
               />
               {editedSource.attachmentName && (
                 <div className="mt-3 flex items-center justify-between gap-3 font-mono text-xs">
-                  <span className="text-ink dark:text-dark-ink">Attached: {editedSource.attachmentName}</span>
+                  <span className="text-ink dark:text-dark-ink">
+                    Attached: {editedSource.attachmentName}
+                    {attachmentPreviewUrl && (
+                      <>
+                        {' '}
+                        (
+                        <a
+                          href={attachmentPreviewUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="underline"
+                        >
+                          open
+                        </a>
+                        )
+                      </>
+                    )}
+                  </span>
                   <button
                     type="button"
-                    onClick={() => {
-                      updateField('attachmentName', undefined);
-                      updateField('attachmentMimeType', undefined);
-                      updateField('attachmentDataUrl', undefined);
-                      updateField('uploadRequired', !editedSource.url);
-                    }}
+                    onClick={() => void handleAttachmentRemove()}
                     className="text-error hover:underline"
                   >
                     Remove file
@@ -781,19 +1039,23 @@ function SourceEditor({
             Delete Source
           </button>
         )}
-        <div className="flex gap-2 ml-auto">
+        <div className="flex gap-2 ml-auto items-center">
           <button
-            onClick={onCancel}
+            onClick={handleCancel}
             className="px-4 py-2 border border-outline dark:border-dark-outline text-ink dark:text-dark-ink font-mono text-sm"
           >
-            Cancel
+            {isNew ? 'Cancel' : 'Done'}
           </button>
           <button
-            onClick={() => onSave(editedSource)}
+            onClick={() => {
+              flushSave();
+              onSave(editedRef.current);
+            }}
             disabled={!editedSource.title.trim()}
             className="px-4 py-2 bg-ink dark:bg-dark-ink text-inverse-on-surface dark:text-dark-surface font-mono text-sm uppercase tracking-wider disabled:opacity-50"
+            title="Save and close (Cmd/Ctrl+S saves without closing)"
           >
-            Save Source
+            Save & Close
           </button>
         </div>
       </div>

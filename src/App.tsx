@@ -16,6 +16,7 @@ import CourseBuilderPage from './pages/CourseBuilderPage';
 import PublicPage from './pages/PublicPage';
 import SettingsPage from './pages/SettingsPage';
 import SourcesPage from './pages/SourcesPage';
+import AccountPage from './pages/AccountPage';
 
 function App() {
   const { isDark, toggleDarkMode, preference, setDarkMode } = useDarkMode();
@@ -55,6 +56,7 @@ function App() {
           <Route path="/builder" element={<CourseBuilderPage />} />
           <Route path="/builder/:courseId" element={<CourseBuilderPage />} />
           <Route path="/settings" element={<SettingsPage />} />
+          <Route path="/account" element={<AccountPage />} />
         </Route>
       </Routes>
     </BrowserRouter>
