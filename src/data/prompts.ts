@@ -30,9 +30,15 @@ behalf of the student. Your only job is structure extraction.
 
 # Output rules (read carefully)
 
-- Output ONE Markdown fenced JSON block (\`\`\`json … \`\`\`) and NOTHING ELSE.
-  No prose before, no explanation after.
-- The JSON must parse with \`JSON.parse()\`. No comments, no trailing commas.
+- Output ONE single-line HTML comment of the form
+  \`<!-- N sections extracted -->\` (with N replaced by the count),
+  then ONE Markdown fenced JSON block (\`\`\`json … \`\`\`), and NOTHING ELSE.
+  No other prose, no explanation, no second fenced block.
+- The JSON must parse with \`JSON.parse()\`. No JS comments, no trailing
+  commas, no \`undefined\`.
+- NEVER emit \`null\` for an optional field — OMIT the key entirely if you
+  don't have a real value. The importer treats \`null\` as a real value
+  and may reject the entry.
 - Every \`id\` is kebab-case ASCII, ≤ 32 chars (e.g. \`module-1\`, \`lo-3\`,
   \`udl-framework\`).
 - Use the section label that the syllabus actually uses: if it says
@@ -178,6 +184,19 @@ into their parent section.
 \`requirements\`: \`publicLinkRequired: true\`,
 \`minimumFurtherExplorationAreas: 3\`, \`requiresFinalSynthesis: true\`,
 \`requiresResources: true\`, \`requiresMedia: false\`.
+
+# Common failure modes to avoid
+
+1. Over-counting sections. Before you write the JSON, count the section
+   headers in the syllabus schedule (NOT in-text references). State that
+   count in the \`<!-- N sections extracted -->\` comment. If your final
+   \`sections\` array length disagrees with that count, you have collapsed
+   real sections or expanded references — fix it before outputting.
+2. Emitting \`null\`. If a field would be \`null\`, \`""\`, or "N/A", just
+   omit the key. Importer-friendly absence is better than a typed blank.
+3. Wrapping in extra prose, headings, or apologies. The ONLY allowed
+   content outside the fenced block is the single \`<!-- N sections
+   extracted -->\` comment immediately before it.
 
 # Now do it
 

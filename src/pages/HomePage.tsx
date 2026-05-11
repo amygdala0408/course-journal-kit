@@ -2,6 +2,7 @@ import { Link } from 'react-router-dom';
 import { getCoursePacks } from '../course-packs';
 import { getEntries } from '../utils/storage';
 import { calculateCourseProgress } from '../utils/progress';
+import SyllabusImportPanel from '../components/SyllabusImportPanel';
 
 export default function HomePage() {
   const coursePacks = getCoursePacks();
@@ -18,6 +19,21 @@ export default function HomePage() {
           track growth over time, and connect course concepts to real-world professional practice.
         </p>
       </header>
+
+      {/* Start a course from a syllabus */}
+      <section className="mb-12 border-2 border-ink dark:border-dark-ink p-6">
+        <header className="mb-6">
+          <h2 className="font-editorial text-3xl font-semibold text-ink dark:text-dark-ink leading-tight">
+            Start a course from a syllabus
+          </h2>
+          <p className="text-ink-muted dark:text-dark-ink-muted mt-2 max-w-3xl">
+            Copy the prompt, paste it into Claude or ChatGPT with your syllabus attached,
+            then upload the <code>.md</code> reply here. Course Journal Kit validates the
+            structure and installs the course.
+          </p>
+        </header>
+        <SyllabusImportPanel compact />
+      </section>
 
       {/* Course Cards */}
       <section>
